@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ipekutku/ai-sre-agent/internal/httpmetrics"
 	"github.com/ipekutku/ai-sre-agent/internal/httpserver"
 	"github.com/ipekutku/ai-sre-agent/internal/services/checkout"
 	"github.com/ipekutku/ai-sre-agent/internal/version"
@@ -41,10 +42,16 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	inv := checkout.NewInventoryClient(cfg.inventoryURL, &http.Client{Timeout: cfg.inventoryTimeout})
+	reg := httpmetrics.NewRegistry()
+	inv := checkout.NewInventoryClient(cfg.inventoryURL, &http.Client{
+		Timeout:   cfg.inventoryTimeout,
+		Transport: httpmetrics.NewClient(reg).Transport("inventory-api", nil),
+	})
+	handler := httpmetrics.Handler(reg, checkout.NewHandler(logger, inv))
+
 	logger.Info("starting", "version", version.Version,
 		"inventory_url", cfg.inventoryURL, "inventory_timeout", cfg.inventoryTimeout.String())
-	if err := httpserver.Run(ctx, logger, cfg.addr, checkout.NewHandler(logger, inv)); err != nil {
+	if err := httpserver.Run(ctx, logger, cfg.addr, handler); err != nil {
 		logger.Error("server failed", "error", err)
 		os.Exit(1)
 	}

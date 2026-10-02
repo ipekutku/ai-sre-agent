@@ -1,4 +1,6 @@
-.PHONY: fmt fmt-check vet test ci
+.PHONY: fmt fmt-check vet test ci up down
+
+COMPOSE := docker compose -f deploy/docker-compose.yml
 
 ## fmt: format all Go source files in place
 fmt:
@@ -23,3 +25,11 @@ test:
 
 ## ci: run the same checks as CI
 ci: fmt-check vet test
+
+## up: build and start the local environment (services + Prometheus)
+up:
+	$(COMPOSE) up --build -d
+
+## down: stop the local environment and remove its containers
+down:
+	$(COMPOSE) down

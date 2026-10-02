@@ -1,0 +1,41 @@
+name: ai-sre-agent
+
+# Ports are bound to 127.0.0.1 so the demo environment is not exposed on the network.
+
+services:
+  inventory-api:
+    build:
+      context: ..
+      args:
+        SERVICE: inventory-api
+    environment:
+      ADDR: ":8081"
+    ports:
+      - "127.0.0.1:8081:8081"
+
+  checkout-api:
+    build:
+      context: ..
+      args:
+        SERVICE: checkout-api
+    environment:
+      ADDR: ":8080"
+      INVENTORY_URL: "http://inventory-api:8081"
+      INVENTORY_TIMEOUT: "2s"
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      - inventory-api
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=1d
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      - checkout-api
+      - inventory-api

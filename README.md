@@ -11,8 +11,8 @@ the agent never sees.
 
 ## Status
 
-**Milestone 1: Metrics-Based Incident Investigator** (in progress). The two demo services exist;
-metrics, Docker Compose, fault injection, and the agent are not built yet.
+**Milestone 1: Metrics-Based Incident Investigator** (in progress). The two demo services run
+under Docker Compose and Prometheus scrapes their metrics. Fault injection and the agent are not built yet.
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan.
 
 ## Demo services
@@ -43,6 +43,50 @@ Configuration is via environment variables:
 | `ADDR` | both | `:8080` / `:8081` |
 | `INVENTORY_URL` | checkout-api | `http://localhost:8081` |
 | `INVENTORY_TIMEOUT` | checkout-api | `2s` |
+
+## Local environment
+
+Requires Docker with the Compose plugin.
+
+```bash
+make up     # build and start checkout-api, inventory-api, and Prometheus
+make down   # stop and remove the containers
+```
+
+| Component | URL |
+|---|---|
+| checkout-api | http://localhost:8080/checkout |
+| inventory-api | http://localhost:8081/inventory |
+| Prometheus | http://localhost:9090 |
+
+Ports are bound to `127.0.0.1` only. Prometheus scrapes every 5s
+([`deploy/prometheus/prometheus.yml`](deploy/prometheus/prometheus.yml)).
+
+## Metrics
+
+Each service exposes `GET /metrics`. Prometheus sets the `job` label to the service name.
+
+| Metric | Labels | Measures |
+|---|---|---|
+| `http_server_request_duration_seconds` | `route`, `method`, `status` | inbound requests handled by the service |
+| `http_client_request_duration_seconds` | `peer`, `method`, `status` | outbound calls to a dependency, as seen by the caller (`status="error"` if no response) |
+| `process_cpu_seconds_total`, `go_*` | | process and Go runtime |
+
+`route` is the matched route pattern (`unmatched` for unknown paths). Request count and status
+come from the histograms' `_count` series.
+
+These separate the three latencies an investigation needs to tell apart:
+
+```promql
+# checkout-api server latency (p95)
+histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job="checkout-api", route="/checkout"}[1m])))
+
+# checkout-api -> inventory-api dependency latency (p95)
+histogram_quantile(0.95, sum by (le) (rate(http_client_request_duration_seconds_bucket{job="checkout-api", peer="inventory-api"}[1m])))
+
+# inventory-api server latency (p95)
+histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job="inventory-api", route="/inventory"}[1m])))
+```
 
 ## Requirements
 

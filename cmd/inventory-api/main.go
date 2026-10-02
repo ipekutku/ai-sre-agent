@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/ipekutku/ai-sre-agent/internal/httpmetrics"
 	"github.com/ipekutku/ai-sre-agent/internal/httpserver"
 	"github.com/ipekutku/ai-sre-agent/internal/services/inventory"
 	"github.com/ipekutku/ai-sre-agent/internal/version"
@@ -25,7 +26,8 @@ func main() {
 
 	addr := envOr("ADDR", ":8081")
 	logger.Info("starting", "version", version.Version)
-	if err := httpserver.Run(ctx, logger, addr, inventory.NewHandler()); err != nil {
+	handler := httpmetrics.Handler(httpmetrics.NewRegistry(), inventory.NewHandler())
+	if err := httpserver.Run(ctx, logger, addr, handler); err != nil {
 		logger.Error("server failed", "error", err)
 		os.Exit(1)
 	}
