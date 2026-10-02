@@ -83,6 +83,20 @@ curl localhost:9081/fault                           # current state: {"latency_m
 The API is `GET`, `PUT {"latency_ms": n}`, and `DELETE` on `/fault`. Delays are fixed (no
 jitter), so the same setting always produces the same latency.
 
+## Scenarios
+
+Each incident scenario lives in [`scenarios/<id>/`](scenarios/):
+
+| File | Contents | Read by |
+|---|---|---|
+| `scenario.yaml` | the incident to raise and the fault to inject | scenario runner (`internal/scenarios`) |
+| `ground-truth.yaml` | the expected root-cause code | evaluator only (`internal/evaluation`) |
+
+The investigation agent receives only the scenario's `incident` (alert, service, severity,
+description), which describes the symptom and never the cause. The evaluator passes a diagnosis
+only if it is valid (including at least one piece of evidence), refers to the scenario's incident,
+and reports the expected root-cause code.
+
 ## Metrics
 
 Each service exposes `GET /metrics`. Prometheus sets the `job` label to the service name.

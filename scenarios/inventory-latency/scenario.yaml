@@ -1,0 +1,17 @@
+# Read by the scenario runner. Only `incident` is given to the investigation agent.
+id: inventory-latency
+description: >-
+  inventory-api responds slowly, so checkout-api requests that depend on it
+  breach their latency threshold.
+
+incident:
+  incident_id: inc-001
+  alert: HighCheckoutLatency
+  service: checkout-api
+  severity: warning
+  description: p95 request latency exceeded threshold
+
+fault:
+  service: inventory-api
+  type: latency
+  latency_ms: 800
