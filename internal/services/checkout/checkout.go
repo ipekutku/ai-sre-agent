@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/ipekutku/ai-sre-agent/internal/httpserver"
 	"github.com/ipekutku/ai-sre-agent/internal/services/inventory"
 )
 
@@ -44,9 +45,7 @@ func NewHandler(logger *slog.Logger, inv Inventory) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, Response{Status: "ok", Item: item})
 	})
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
+	mux.Handle("GET /healthz", httpserver.HealthHandler())
 	return mux
 }
 

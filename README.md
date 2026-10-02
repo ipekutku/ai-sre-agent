@@ -11,8 +11,16 @@ the agent never sees.
 
 ## Status
 
-**Milestone 1: Metrics-Based Incident Investigator** (in progress). The two demo services run
-under Docker Compose and Prometheus scrapes their metrics. Fault injection and the agent are not built yet.
+**Milestone 1: Metrics-Based Incident Investigator** (in progress).
+
+Done:
+
+- `checkout-api` and `inventory-api` run under Docker Compose, instrumented with Prometheus metrics
+- deterministic latency fault injection in `inventory-api`
+- the `inventory-latency` scenario, its ground truth, the diagnosis schema, and the evaluator
+- the `query_metrics` and `inspect_service` investigation tools
+
+Not built yet: the LLM client, the investigation loop, and the end-to-end `make eval` command.
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan.
 
 ## Demo services
@@ -61,7 +69,6 @@ make down   # stop and remove the containers
 | checkout-api | http://localhost:8080/checkout |
 | inventory-api | http://localhost:8081/inventory |
 | Prometheus | http://localhost:9090 |
-
 | inventory-api fault admin | http://localhost:9081/fault |
 
 Ports are bound to `127.0.0.1` only. Prometheus scrapes every 5s
@@ -96,6 +103,19 @@ The investigation agent receives only the scenario's `incident` (alert, service,
 description), which describes the symptom and never the cause. The evaluator passes a diagnosis
 only if it is valid (including at least one piece of evidence), refers to the scenario's incident,
 and reports the expected root-cause code.
+
+## Investigation tools
+
+The agent can only observe the system through these tools ([`internal/tools`](internal/tools)):
+
+| Tool | Does | Limits |
+|---|---|---|
+| `query_metrics` | read-only PromQL (instant, or a range over the last N minutes) against a fixed Prometheus URL | query ≤ 1000 chars, range ≤ 60 min, ≤ 20 series, ≤ 30 points/series, 2 MiB response cap |
+| `inspect_service` | name, health status, version (from `GET /healthz`), and dependencies (from a fixed catalog) | catalog services only; never sees admin/fault endpoints |
+
+All calls go through a registry that enforces a per-call timeout and output-size limit, logs each
+call with its latency, and returns failures as structured errors (`unknown_tool`, `invalid_input`,
+`timeout`, `output_too_large`, `execution_failed`) the model can react to.
 
 ## Metrics
 

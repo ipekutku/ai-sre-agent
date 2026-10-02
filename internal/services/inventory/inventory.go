@@ -4,6 +4,8 @@ package inventory
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/ipekutku/ai-sre-agent/internal/httpserver"
 )
 
 const defaultSKU = "demo-sku"
@@ -35,9 +37,7 @@ func NewHandler(latency *Latency) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, Item{SKU: sku, Quantity: 42})
 	})
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
+	mux.Handle("GET /healthz", httpserver.HealthHandler())
 	return mux
 }
 
