@@ -1,0 +1,3 @@
+# Read by the evaluator only. Must never be given to the investigation agent.
+expected_root_cause:
+  code: INVENTORY_DOWNSTREAM_LATENCY
