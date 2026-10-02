@@ -4,18 +4,35 @@ package httpserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/ipekutku/ai-sre-agent/internal/version"
 )
 
 const (
 	readHeaderTimeout = 5 * time.Second
 	shutdownTimeout   = 10 * time.Second
 )
+
+// Health is the response body of GET /healthz.
+type Health struct {
+	Status  string `json:"status"`
+	Version string `json:"version"`
+}
+
+// HealthHandler serves GET /healthz: {"status":"ok","version":"<build version>"}.
+func HealthHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(Health{Status: "ok", Version: version.Version})
+	})
+}
 
 // Run serves handler on addr until ctx is cancelled, then shuts down
 // gracefully. It returns nil after a clean shutdown.
