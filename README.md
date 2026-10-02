@@ -27,6 +27,7 @@ GET /checkout  ->  checkout-api  --HTTP-->  inventory-api  <-  GET /inventory
 | `inventory-api` | `GET /inventory?sku=...`, `GET /healthz` | `:8081` |
 
 `checkout-api` returns `502` if its call to `inventory-api` fails or times out.
+`inventory-api` responds after a fixed baseline delay (`BASE_LATENCY`, 20 ms by default).
 
 Run them locally in two terminals:
 
@@ -43,6 +44,8 @@ Configuration is via environment variables:
 | `ADDR` | both | `:8080` / `:8081` |
 | `INVENTORY_URL` | checkout-api | `http://localhost:8081` |
 | `INVENTORY_TIMEOUT` | checkout-api | `2s` |
+| `ADMIN_ADDR` | inventory-api | `127.0.0.1:9081` |
+| `BASE_LATENCY` | inventory-api | `20ms` |
 
 ## Local environment
 
@@ -59,8 +62,26 @@ make down   # stop and remove the containers
 | inventory-api | http://localhost:8081/inventory |
 | Prometheus | http://localhost:9090 |
 
+| inventory-api fault admin | http://localhost:9081/fault |
+
 Ports are bound to `127.0.0.1` only. Prometheus scrapes every 5s
 ([`deploy/prometheus/prometheus.yml`](deploy/prometheus/prometheus.yml)).
+
+## Fault injection
+
+`inventory-api` serves a fault-injection admin API on a separate port (`ADMIN_ADDR`). It is not
+instrumented, so fault state never appears in metrics. See
+[ADR 0001](docs/adr/0001-fault-injection-admin-api.md) for why.
+
+```bash
+make fault-inventory-latency                        # inventory-api now responds in 800 ms
+make fault-inventory-latency FAULT_LATENCY_MS=1500  # custom latency (max 10000)
+make fault-clear                                    # back to the 20 ms baseline
+curl localhost:9081/fault                           # current state: {"latency_ms": 0} = no fault
+```
+
+The API is `GET`, `PUT {"latency_ms": n}`, and `DELETE` on `/fault`. Delays are fixed (no
+jitter), so the same setting always produces the same latency.
 
 ## Metrics
 

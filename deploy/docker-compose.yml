@@ -10,8 +10,12 @@ services:
         SERVICE: inventory-api
     environment:
       ADDR: ":8081"
+      ADMIN_ADDR: ":9081"
+      BASE_LATENCY: "20ms"
     ports:
       - "127.0.0.1:8081:8081"
+      # Fault-injection admin API. Not scraped by Prometheus.
+      - "127.0.0.1:9081:9081"
 
   checkout-api:
     build:
