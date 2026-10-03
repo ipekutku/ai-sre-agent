@@ -51,6 +51,11 @@ func LoadGroundTruth(dir string) (GroundTruth, error) {
 		return GroundTruth{}, fmt.Errorf("invalid ground truth %s: expected_root_cause.code must be UPPER_SNAKE_CASE, got %q",
 			path, gt.ExpectedRootCause.Code)
 	}
+	// An expected code the agent cannot choose would make the scenario unpassable.
+	if !diagnosis.IsKnownCode(gt.ExpectedRootCause.Code) {
+		return GroundTruth{}, fmt.Errorf("invalid ground truth %s: expected_root_cause.code %q is not in diagnosis.Codes",
+			path, gt.ExpectedRootCause.Code)
+	}
 	return gt, nil
 }
 

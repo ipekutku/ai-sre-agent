@@ -61,6 +61,8 @@ func (d Diagnosis) Validate() error {
 	}
 	if !codePattern.MatchString(d.RootCause.Code) {
 		errs = append(errs, fmt.Errorf("root_cause.code must be UPPER_SNAKE_CASE, got %q", d.RootCause.Code))
+	} else if !IsKnownCode(d.RootCause.Code) {
+		errs = append(errs, fmt.Errorf("root_cause.code %q is not a known root-cause code", d.RootCause.Code))
 	}
 	if d.RootCause.Summary == "" {
 		errs = append(errs, errors.New("root_cause.summary is required"))
