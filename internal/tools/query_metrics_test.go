@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -101,7 +103,8 @@ func TestQueryMetricsRange(t *testing.T) {
 	if fake.path != "/api/v1/query_range" {
 		t.Errorf("path = %s, want /api/v1/query_range", fake.path)
 	}
-	wantStart := fmt.Sprint(fixedNow.Add(-5*time.Minute).Unix()) + ".000"
+	// 5m window, 11s step: 27 steps back from now, so the last point is now.
+	wantStart := fmt.Sprint(fixedNow.Add(-27*11*time.Second).Unix()) + ".000"
 	if fake.form.Get("start") != wantStart || fake.form.Get("step") != "11" {
 		t.Errorf("form = %v, want start %s and step 11", fake.form, wantStart)
 	}
@@ -220,5 +223,28 @@ func assertToolError(t *testing.T, err error, want ErrorCode) {
 	}
 	if te.Code != want {
 		t.Errorf("code = %s (%s), want %s", te.Code, te.Message, want)
+	}
+}
+
+// Regression: range queries must include a point at "now". Before the fix,
+// a 30-minute range (63s step) ended ~36s in the past and missed a fault
+// that started seconds earlier, so the agent saw only pre-incident data.
+func TestRangeQueryLastPointIsNow(t *testing.T) {
+	for m := 1; m <= maxRangeMinutes; m++ {
+		fake := &fakePrometheus{status: 200, body: `{"status":"success","data":{"resultType":"matrix","result":[]}}`}
+		q := newQueryMetrics(t, fake)
+		if _, err := callQM(t, q, fmt.Sprintf(`{"query":"up","range_minutes":%d}`, m)); err != nil {
+			t.Fatal(err)
+		}
+		start, _ := strconv.ParseFloat(fake.form.Get("start"), 64)
+		end, _ := strconv.ParseFloat(fake.form.Get("end"), 64)
+		step, _ := strconv.ParseFloat(fake.form.Get("step"), 64)
+		points := (end-start)/step + 1
+		if math.Abs(points-math.Round(points)) > 1e-6 {
+			t.Errorf("%dm: (end-start)/step = %v is not whole, so the last point is not at end", m, points-1)
+		}
+		if math.Round(points) > maxPointsPerSeries || end-start > float64(m*60) {
+			t.Errorf("%dm: %v points over %vs, want <= %d points within the window", m, math.Round(points), end-start, maxPointsPerSeries)
+		}
 	}
 }

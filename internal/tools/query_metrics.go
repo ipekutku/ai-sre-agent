@@ -139,9 +139,14 @@ func (q *QueryMetrics) Call(ctx context.Context, raw json.RawMessage) (any, erro
 	} else {
 		path = "/api/v1/query_range"
 		window := time.Duration(in.RangeMinutes) * time.Minute
-		form.Set("start", formatUnix(now.Add(-window)))
+		step := rangeStep(window)
+		// Prometheus evaluates at start, start+step, ... <= end. Anchor start so
+		// the last point is exactly now; otherwise the most recent point can be
+		// up to one step old and miss a change that just happened.
+		start := now.Add(-step * (window / step))
+		form.Set("start", formatUnix(start))
 		form.Set("end", formatUnix(now))
-		form.Set("step", strconv.FormatFloat(rangeStep(window).Seconds(), 'f', -1, 64))
+		form.Set("step", strconv.FormatFloat(step.Seconds(), 'f', -1, 64))
 	}
 
 	resp, err := q.post(ctx, path, form)

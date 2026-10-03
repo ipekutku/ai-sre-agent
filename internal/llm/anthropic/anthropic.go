@@ -24,6 +24,9 @@ type Config struct {
 	// APIKey authenticates requests. If empty, the SDK's default credential
 	// resolution applies (ANTHROPIC_API_KEY, then other configured sources).
 	APIKey string
+	// WorkspaceID selects the workspace for API keys that are not scoped to
+	// one (sent as the anthropic-workspace-id header). Optional.
+	WorkspaceID string
 	// Model is the model ID. Default DefaultModel.
 	Model string
 	// MaxTokens bounds each response. Default 16000.
@@ -85,6 +88,9 @@ func New(cfg Config) (*Client, error) {
 	}
 	if cfg.APIKey != "" {
 		opts = append(opts, option.WithAPIKey(cfg.APIKey))
+	}
+	if cfg.WorkspaceID != "" {
+		opts = append(opts, option.WithHeader("anthropic-workspace-id", cfg.WorkspaceID))
 	}
 	if cfg.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
@@ -249,6 +255,19 @@ func classify(err error) error {
 		msg := string(apiErr.Type())
 		if msg == "" {
 			msg = http.StatusText(apiErr.StatusCode)
+		}
+		// Include the API's explanation; without it, errors such as a low credit
+		// balance or an unknown model are indistinguishable.
+		var body struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal([]byte(apiErr.RawJSON()), &body) == nil && body.Error.Message != "" {
+			msg += ": " + body.Error.Message
+		}
+		if apiErr.RequestID != "" {
+			msg += " (request " + apiErr.RequestID + ")"
 		}
 		return &llm.Error{Kind: kind, StatusCode: apiErr.StatusCode, Message: msg, Err: err}
 	}
