@@ -20,8 +20,10 @@ Done:
 - the `inventory-latency` scenario, its ground truth, the diagnosis schema, and the evaluator
 - the `query_metrics` and `inspect_service` investigation tools
 - a provider-independent LLM client interface, implemented for Claude (default `claude-sonnet-5-5`)
+- the investigation loop (`internal/agent`): tool dispatch, budgets, timeout, and a validated
+  diagnosis chosen from a fixed list of root-cause codes ([ADR 0002](docs/adr/0002-closed-root-cause-taxonomy.md))
 
-Not built yet: the investigation loop and the end-to-end `make eval` command. Running real
+Not built yet: the end-to-end `make eval` command. Running real
 investigations will require an Anthropic API key (`ANTHROPIC_API_KEY`); tests use a fake API.
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan.
 

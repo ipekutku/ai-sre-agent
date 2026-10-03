@@ -39,13 +39,14 @@ func TestParseRejects(t *testing.T) {
 		{"unknown field", strings.Replace(validJSON, `"confidence"`, `"ground_truth": "x", "confidence"`, 1), "unknown field"},
 		{"trailing data", validJSON + `{}`, "unexpected data"},
 		{"lowercase code", strings.Replace(validJSON, "INVENTORY_DOWNSTREAM_LATENCY", "inventory latency", 1), "UPPER_SNAKE_CASE"},
+		{"code not in the list", strings.Replace(validJSON, "INVENTORY_DOWNSTREAM_LATENCY", "INVENTORY_SLOW_RESPONSES", 1), "not a known root-cause code"},
 		{"confidence above 1", strings.Replace(validJSON, "0.94", "1.5", 1), "confidence must be in [0, 1]"},
 		{"negative confidence", strings.Replace(validJSON, "0.94", "-0.1", 1), "confidence must be in [0, 1]"},
 		{"missing incident", strings.Replace(validJSON, `"inc-001"`, `""`, 1), "incident_id is required"},
-		{"empty summary", `{"incident_id":"i","root_cause":{"code":"X","summary":""},"confidence":0.5,"evidence":[{"source":"s","observation":"o"}]}`, "summary is required"},
-		{"no evidence", `{"incident_id":"i","root_cause":{"code":"X","summary":"s"},"confidence":0.5,"evidence":[]}`, "at least one evidence"},
-		{"empty evidence fields", `{"incident_id":"i","root_cause":{"code":"X","summary":"s"},"confidence":0.5,"evidence":[{"source":"","observation":"o"}]}`, "evidence[0]"},
-		{"empty action", `{"incident_id":"i","root_cause":{"code":"X","summary":"s"},"confidence":0.5,"evidence":[{"source":"s","observation":"o"}],"recommended_actions":[""]}`, "recommended_actions[0]"},
+		{"empty summary", `{"incident_id":"i","root_cause":{"code":"UNKNOWN","summary":""},"confidence":0.5,"evidence":[{"source":"s","observation":"o"}]}`, "summary is required"},
+		{"no evidence", `{"incident_id":"i","root_cause":{"code":"UNKNOWN","summary":"s"},"confidence":0.5,"evidence":[]}`, "at least one evidence"},
+		{"empty evidence fields", `{"incident_id":"i","root_cause":{"code":"UNKNOWN","summary":"s"},"confidence":0.5,"evidence":[{"source":"","observation":"o"}]}`, "evidence[0]"},
+		{"empty action", `{"incident_id":"i","root_cause":{"code":"UNKNOWN","summary":"s"},"confidence":0.5,"evidence":[{"source":"s","observation":"o"}],"recommended_actions":[""]}`, "recommended_actions[0]"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

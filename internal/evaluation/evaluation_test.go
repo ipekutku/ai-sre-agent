@@ -64,8 +64,8 @@ func TestEvaluate(t *testing.T) {
 		},
 		{
 			name:       "wrong root cause",
-			mutate:     func(d *diagnosis.Diagnosis) { d.RootCause.Code = "CHECKOUT_CPU_SATURATION" },
-			wantActual: "CHECKOUT_CPU_SATURATION",
+			mutate:     func(d *diagnosis.Diagnosis) { d.RootCause.Code = "CHECKOUT_RESOURCE_SATURATION" },
+			wantActual: "CHECKOUT_RESOURCE_SATURATION",
 			wantReason: "does not match ground truth",
 		},
 		{
@@ -137,6 +137,7 @@ func TestLoadGroundTruthRejects(t *testing.T) {
 		{"missing code", "expected_root_cause: {}\n", "UPPER_SNAKE_CASE"},
 		{"lowercase code", "expected_root_cause:\n  code: inventory latency\n", "UPPER_SNAKE_CASE"},
 		{"unknown field", "expected_root_cause:\n  code: X\nnotes: y\n", "field notes not found"},
+		{"code not in the list", "expected_root_cause:\n  code: DISK_FULL\n", "not in diagnosis.Codes"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
