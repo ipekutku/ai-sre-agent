@@ -48,6 +48,10 @@ fault:
   service: inventory-api
   type: latency
   latency_ms: 800
+trigger:
+  query: up
+  above: 0.5
+  timeout_seconds: 60
 `
 
 func writeScenario(t *testing.T, name, content string) string {
@@ -78,6 +82,8 @@ func TestLoadRejects(t *testing.T) {
 		{"zero latency", "demo", strings.Replace(validYAML, "latency_ms: 800", "latency_ms: 0", 1), "latency_ms must be"},
 		{"latency above cap", "demo", strings.Replace(validYAML, "latency_ms: 800", "latency_ms: 60000", 1), "latency_ms must be"},
 		{"not yaml", "demo", "id: [", "parse"},
+		{"missing trigger query", "demo", strings.Replace(validYAML, "query: up", "query: ''", 1), "trigger: query is required"},
+		{"bad trigger timeout", "demo", strings.Replace(validYAML, "timeout_seconds: 60", "timeout_seconds: 0", 1), "timeout_seconds"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

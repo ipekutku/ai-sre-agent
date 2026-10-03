@@ -277,3 +277,35 @@ func TestUnknownModelCost(t *testing.T) {
 		t.Errorf("usage = %+v, want tokens but unknown cost", resp.Usage)
 	}
 }
+
+func TestCheck(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/models/"+DefaultModel {
+			_, _ = io.WriteString(w, `{"type":"model","id":"`+DefaultModel+`","display_name":"Sonnet","created_at":"2026-01-01T00:00:00Z"}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"not_found_error","message":"model not found"}}`)
+	}))
+	defer srv.Close()
+
+	ok, _ := New(Config{APIKey: "k", BaseURL: srv.URL, MaxRetries: -1})
+	if err := ok.Check(context.Background()); err != nil {
+		t.Errorf("valid model: %v", err)
+	}
+	bad, _ := New(Config{APIKey: "k", BaseURL: srv.URL, MaxRetries: -1, Model: "claude-nope"})
+	if err := bad.Check(context.Background()); llm.KindOf(err) != llm.ErrInvalidRequest {
+		t.Errorf("unknown model: err = %v, want invalid_request", err)
+	}
+
+	// No credentials anywhere: reported as auth, without a network call.
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	none, _ := New(Config{BaseURL: srv.URL, MaxRetries: -1})
+	if err := none.Check(context.Background()); llm.KindOf(err) != llm.ErrAuth {
+		t.Errorf("no credentials: err = %v, want auth", err)
+	}
+}

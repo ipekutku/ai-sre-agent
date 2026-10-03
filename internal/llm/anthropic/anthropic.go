@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	sdk "github.com/anthropics/anthropic-sdk-go"
@@ -96,6 +97,23 @@ func New(cfg Config) (*Client, error) {
 
 // Model returns the configured model ID.
 func (c *Client) Model() string { return c.model }
+
+// Check verifies credentials and the model ID with a model lookup, which
+// consumes no tokens. Use it to fail fast before a long setup.
+func (c *Client) Check(ctx context.Context) error {
+	if _, err := c.sdk.Models.Get(ctx, c.model, sdk.ModelGetParams{}); err != nil {
+		var apiErr *sdk.Error
+		var netErr *url.Error
+		if !errors.As(err, &apiErr) && !errors.As(err, &netErr) &&
+			!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			// Errors raised before any HTTP request (e.g. no credentials found)
+			// are configuration problems, not network failures.
+			return &llm.Error{Kind: llm.ErrAuth, Message: err.Error(), Err: err}
+		}
+		return classify(err)
+	}
+	return nil
+}
 
 // Generate sends one Messages API request.
 func (c *Client) Generate(ctx context.Context, req llm.Request) (llm.Response, error) {

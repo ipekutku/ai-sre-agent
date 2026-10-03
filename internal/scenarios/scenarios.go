@@ -37,6 +37,16 @@ type Scenario struct {
 	Description string            `yaml:"description"`
 	Incident    incident.Incident `yaml:"incident"`
 	Fault       Fault             `yaml:"fault"`
+	Trigger     Trigger           `yaml:"trigger"`
+}
+
+// Trigger is the alert condition the runner waits for before raising the
+// incident: the first value of Query must exceed Above within TimeoutSeconds.
+// It is for the runner only; the agent never sees it.
+type Trigger struct {
+	Query          string  `yaml:"query"`
+	Above          float64 `yaml:"above"`
+	TimeoutSeconds int     `yaml:"timeout_seconds"`
 }
 
 // Fault describes the failure the scenario runner injects.
@@ -81,6 +91,12 @@ func (s Scenario) Validate() error {
 	}
 	if err := s.Fault.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("fault: %w", err))
+	}
+	if s.Trigger.Query == "" {
+		errs = append(errs, errors.New("trigger: query is required"))
+	}
+	if s.Trigger.TimeoutSeconds <= 0 || s.Trigger.TimeoutSeconds > 600 {
+		errs = append(errs, fmt.Errorf("trigger: timeout_seconds must be in (0, 600], got %d", s.Trigger.TimeoutSeconds))
 	}
 	return errors.Join(errs...)
 }
