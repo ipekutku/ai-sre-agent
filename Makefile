@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check vet test ci up down fault-inventory-latency fault-clear
+.PHONY: fmt fmt-check vet test ci up down fault-inventory-latency fault-clear eval
 
 COMPOSE := docker compose -f deploy/docker-compose.yml
 INVENTORY_ADMIN := http://127.0.0.1:9081
@@ -44,3 +44,9 @@ fault-inventory-latency:
 ## fault-clear: restore inventory-api's baseline latency
 fault-clear:
 	@curl -fsS -X DELETE $(INVENTORY_ADMIN)/fault
+
+## eval: start the environment and run the inventory-latency scenario end to end
+##       (needs ANTHROPIC_API_KEY; pass runner flags with EVAL_ARGS="-effort high")
+SCENARIO ?= scenarios/inventory-latency
+eval: up
+	go run ./cmd/scenario-runner -scenario $(SCENARIO) $(EVAL_ARGS)

@@ -22,10 +22,56 @@ Done:
 - a provider-independent LLM client interface, implemented for Claude (default `claude-sonnet-5-5`)
 - the investigation loop (`internal/agent`): tool dispatch, budgets, timeout, and a validated
   diagnosis chosen from a fixed list of root-cause codes ([ADR 0002](docs/adr/0002-closed-root-cause-taxonomy.md))
+- `make eval`: the scenario end to end, from fault injection to PASS/FAIL
 
-Not built yet: the end-to-end `make eval` command. Running real
-investigations will require an Anthropic API key (`ANTHROPIC_API_KEY`); tests use a fake API.
+Remaining before `v0.1.0`: a successful `make eval` run against the real API.
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan.
+
+## Running the demo
+
+Requires Docker with the Compose plugin, Go, and an Anthropic API key.
+
+```bash
+export ANTHROPIC_API_KEY=...   # from console.anthropic.com; each run costs a few cents
+make eval
+```
+
+`make eval` starts the environment (`make up`) and runs
+[`cmd/scenario-runner`](cmd/scenario-runner), which:
+
+1. waits until the services and Prometheus are ready, and clears any leftover fault
+2. sends steady `GET /checkout` traffic (20 rps) and records a 60 s baseline
+3. injects the scenario's fault (inventory-api responds in 800 ms)
+4. waits until the alert condition holds in Prometheus (checkout-api p95 > 500 ms)
+5. gives the agent the incident only; the agent investigates through its tools
+6. compares the diagnosis with `ground-truth.yaml`, prints the report, and clears the fault
+
+Example output shape:
+
+```text
+Scenario: inventory-latency
+
+Expected:
+INVENTORY_DOWNSTREAM_LATENCY
+
+Actual:
+INVENTORY_DOWNSTREAM_LATENCY
+
+Result:
+PASS
+
+Investigation:
+  models:          [claude-sonnet-5-5]
+  duration:        ...
+  llm requests:    ...
+  tool calls:      ... (0 failed)
+  tokens:          ...
+  estimated cost:  $...
+```
+
+The exit code is 0 on PASS, 1 on FAIL, 2 on a setup error. Runner options go in `EVAL_ARGS`,
+e.g. `make eval EVAL_ARGS="-effort high -baseline 30s"` (see `go run ./cmd/scenario-runner -h`).
+Without credentials the runner stops immediately. `make down` stops the environment.
 
 ## Demo services
 
@@ -165,7 +211,9 @@ CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `make ci` on ev
 
 ## Documentation
 
-- [docs/PROJECT.md](docs/PROJECT.md): architecture, goals, and design principles
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how the system is built today
+- [docs/PROJECT.md](docs/PROJECT.md): goals and design principles
+- [docs/adr/](docs/adr/): architecture decision records
 - [docs/ROADMAP.md](docs/ROADMAP.md): milestones and exit criteria
 
 ## License

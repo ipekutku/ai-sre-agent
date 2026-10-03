@@ -15,3 +15,9 @@ fault:
   service: inventory-api
   type: latency
   latency_ms: 800
+
+# The incident is raised once this alert condition holds (checkout-api p95 above 500 ms).
+trigger:
+  query: histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job="checkout-api", route="/checkout"}[30s])))
+  above: 0.5
+  timeout_seconds: 120
