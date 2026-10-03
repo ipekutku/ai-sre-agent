@@ -85,7 +85,11 @@ func run(ctx context.Context, logger *slog.Logger, out io.Writer, o options) (bo
 	if err != nil {
 		return false, err
 	}
-	llmClient, err := anthropic.New(anthropic.Config{Model: o.model, Effort: o.effort})
+	llmClient, err := anthropic.New(anthropic.Config{
+		Model:       o.model,
+		Effort:      o.effort,
+		WorkspaceID: os.Getenv("ANTHROPIC_WORKSPACE_ID"), // only needed for keys not scoped to a workspace
+	})
 	if err != nil {
 		return false, err
 	}

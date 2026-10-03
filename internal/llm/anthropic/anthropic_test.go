@@ -309,3 +309,34 @@ func TestCheck(t *testing.T) {
 		t.Errorf("no credentials: err = %v, want auth", err)
 	}
 }
+
+// Regression: the API's error message must be surfaced; the type alone
+// ("invalid_request_error") did not explain a failing run.
+func TestErrorIncludesAPIMessage(t *testing.T) {
+	api := &fakeAPI{status: 400, body: `{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low"}}`}
+	c := newTestClient(t, api, Config{MaxRetries: -1})
+	_, err := c.Generate(context.Background(), llm.Request{Messages: []llm.Message{llm.UserText("hi")}})
+	if err == nil || !strings.Contains(err.Error(), "invalid_request_error: Your credit balance is too low") {
+		t.Errorf("err = %v, want the API message included", err)
+	}
+}
+
+func TestWorkspaceHeader(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get("anthropic-workspace-id"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, toolUseResponse)
+	}))
+	defer srv.Close()
+
+	for _, ws := range []string{"wrkspc_123", ""} {
+		c, _ := New(Config{APIKey: "k", BaseURL: srv.URL, MaxRetries: -1, WorkspaceID: ws})
+		if _, err := c.Generate(context.Background(), llm.Request{Messages: []llm.Message{llm.UserText("hi")}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(got) != 2 || got[0] != "wrkspc_123" || got[1] != "" {
+		t.Errorf("anthropic-workspace-id headers = %q, want [wrkspc_123 \"\"]", got)
+	}
+}
