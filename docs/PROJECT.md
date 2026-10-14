@@ -696,6 +696,7 @@ Initial technology choices:
 | Service runtime | Go |
 | Agent runtime | Go |
 | Metrics | Prometheus |
+| Tracing | OpenTelemetry, Grafana Tempo |
 | Local environment | Docker Compose |
 | CI | GitHub Actions |
 | LLM | Provider behind internal interface |

@@ -5,6 +5,9 @@
 //	ADDR               listen address (default ":8080")
 //	INVENTORY_URL      base URL of inventory-api (default "http://localhost:8081")
 //	INVENTORY_TIMEOUT  timeout per inventory-api call, Go duration (default "2s")
+//
+// Tracing is enabled by the standard OTEL_EXPORTER_OTLP_ENDPOINT variable
+// (see internal/telemetry).
 package main
 
 import (
@@ -21,6 +24,7 @@ import (
 	"github.com/ipekutku/ai-sre-agent/internal/httpmetrics"
 	"github.com/ipekutku/ai-sre-agent/internal/httpserver"
 	"github.com/ipekutku/ai-sre-agent/internal/services/checkout"
+	"github.com/ipekutku/ai-sre-agent/internal/telemetry"
 	"github.com/ipekutku/ai-sre-agent/internal/version"
 )
 
@@ -42,16 +46,28 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	tp, shutdownTracing, err := telemetry.Setup(ctx, logger, "checkout-api", os.Getenv)
+	if err != nil {
+		logger.Error("telemetry setup failed", "error", err)
+		os.Exit(1)
+	}
+
 	reg := httpmetrics.NewRegistry()
 	inv := checkout.NewInventoryClient(cfg.inventoryURL, &http.Client{
-		Timeout:   cfg.inventoryTimeout,
-		Transport: httpmetrics.NewClient(reg).Transport("inventory-api", nil),
+		Timeout: cfg.inventoryTimeout,
+		Transport: telemetry.Transport(tp, "inventory-api",
+			httpmetrics.NewClient(reg).Transport("inventory-api", nil)),
 	})
-	handler := httpmetrics.Handler(reg, checkout.NewHandler(logger, inv))
+	handler := telemetry.Handler(tp, httpmetrics.Handler(reg, checkout.NewHandler(logger, inv)), "/metrics")
 
 	logger.Info("starting", "version", version.Version,
-		"inventory_url", cfg.inventoryURL, "inventory_timeout", cfg.inventoryTimeout.String())
-	if err := httpserver.Run(ctx, logger, cfg.addr, handler); err != nil {
+		"inventory_url", cfg.inventoryURL, "inventory_timeout", cfg.inventoryTimeout.String(),
+		"tracing", telemetry.Enabled(os.Getenv))
+	err = httpserver.Run(ctx, logger, cfg.addr, handler)
+	if serr := telemetry.Shutdown(shutdownTracing); serr != nil {
+		logger.Warn("telemetry shutdown failed", "error", serr)
+	}
+	if err != nil {
 		logger.Error("server failed", "error", err)
 		os.Exit(1)
 	}

@@ -12,10 +12,13 @@ services:
       ADDR: ":8081"
       ADMIN_ADDR: ":9081"
       BASE_LATENCY: "20ms"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://tempo:4318"
     ports:
       - "127.0.0.1:8081:8081"
       # Fault-injection admin API. Not scraped by Prometheus.
       - "127.0.0.1:9081:9081"
+    depends_on:
+      - tempo
 
   checkout-api:
     build:
@@ -26,10 +29,12 @@ services:
       ADDR: ":8080"
       INVENTORY_URL: "http://inventory-api:8081"
       INVENTORY_TIMEOUT: "2s"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://tempo:4318"
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
       - inventory-api
+      - tempo
 
   prometheus:
     image: prom/prometheus:v3.5.0
@@ -43,3 +48,13 @@ services:
     depends_on:
       - checkout-api
       - inventory-api
+
+  # Trace backend. Services push spans to it over OTLP/HTTP (4318, internal
+  # only); its query API is published on 3200.
+  tempo:
+    image: grafana/tempo:3.1.0
+    command: ["-target=all", "-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+    ports:
+      - "127.0.0.1:3200:3200"

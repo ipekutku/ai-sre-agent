@@ -1,6 +1,7 @@
 # Architecture
 
-This document describes the system as implemented (Milestone 1). For goals and long-term
+This document describes the system as implemented (Milestone 1, plus the parts of Milestone 2
+merged so far). For goals and long-term
 direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
 
 ## Overview
@@ -23,6 +24,8 @@ direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
       +---------------------+    Claude API    query_metrics ----> Prometheus :9090
       |  Prometheus :9090   |                  inspect_service --> /healthz + catalog
       +---------------------+
+
+  checkout-api, inventory-api --OTLP/HTTP spans--> Tempo :3200 (not yet queried by the agent)
 ```
 
 ## Components
@@ -32,7 +35,8 @@ direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
 | checkout-api | `cmd/checkout-api`, `internal/services/checkout` | `GET /checkout`; calls inventory-api |
 | inventory-api | `cmd/inventory-api`, `internal/services/inventory` | `GET /inventory` with a fixed baseline delay; fault admin API on a separate port |
 | Metrics | `internal/httpmetrics` | server and client (dependency) latency histograms, `/metrics` |
-| Environment | `deploy/` | Docker Compose: both services and Prometheus (5 s scrape), ports on 127.0.0.1 |
+| Tracing | `internal/telemetry` | OpenTelemetry setup (OTLP/HTTP export, no-op without an endpoint); server and client spans with W3C propagation |
+| Environment | `deploy/` | Docker Compose: both services, Prometheus (5 s scrape), and Tempo; ports on 127.0.0.1 |
 | Scenarios | `scenarios/<id>/`, `internal/scenarios` | incident, fault, alert trigger; environment control for the runner |
 | Tools | `internal/tools` | `query_metrics`, `inspect_service`, and the registry (validation, timeouts, size limits, logging) |
 | LLM boundary | `internal/llm`, `internal/llm/anthropic` | provider-independent `Client`; Claude implementation |
@@ -63,7 +67,7 @@ The agent must infer the cause from observations only.
 - `internal/evaluation` is the only package that reads `ground-truth.yaml`.
 - `TestAgentCannotImportGroundTruth` fails if `internal/agent`, `internal/tools`, or
   `internal/llm` depend on `internal/scenarios` or `internal/evaluation`.
-- The fault admin API is on a separate listener that is not instrumented and is not in the
+- The fault admin API is on a separate listener that is not instrumented or traced and is not in the
   agent's service catalog ([ADR 0001](adr/0001-fault-injection-admin-api.md)).
 - The system prompt and incident text are tested to contain no scenario details.
 
@@ -87,6 +91,9 @@ token usage, and estimated cost.
 
 ## Observability
 
-- Services: request and dependency latency histograms, Go runtime and process metrics.
+- Services: request and dependency latency histograms, Go runtime and process metrics, and
+  traces of every request (one trace per checkout request, exported to Tempo; see
+  [ADR 0003](adr/0003-tracing-backend-and-export.md)). Spans carry standard HTTP attributes
+  only, never fault state.
 - Agent: structured logs per LLM request (model, stop reason, latency, tokens) and per tool call
   (tool, input, duration, outcome), plus an investigation summary. Agent tracing is Milestone 2.

@@ -1,0 +1,25 @@
+# Single-binary Tempo for the local demo environment. Services export spans
+# over OTLP/HTTP; the query API is on :3200. Storage is inside the container
+# and is discarded with it.
+
+server:
+  http_listen_port: 3200
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: "0.0.0.0:4318"
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+usage_report:
+  reporting_enabled: false

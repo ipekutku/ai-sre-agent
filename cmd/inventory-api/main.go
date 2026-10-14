@@ -8,6 +8,10 @@
 //	ADDR          service listen address (default ":8081")
 //	ADMIN_ADDR    fault-injection admin listen address (default "127.0.0.1:9081")
 //	BASE_LATENCY  normal response delay for GET /inventory, Go duration (default "20ms")
+//
+// Tracing of the service API is enabled by the standard
+// OTEL_EXPORTER_OTLP_ENDPOINT variable (see internal/telemetry). The admin
+// API is never traced.
 package main
 
 import (
@@ -15,14 +19,18 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/ipekutku/ai-sre-agent/internal/httpmetrics"
 	"github.com/ipekutku/ai-sre-agent/internal/httpserver"
 	"github.com/ipekutku/ai-sre-agent/internal/services/inventory"
+	"github.com/ipekutku/ai-sre-agent/internal/telemetry"
 	"github.com/ipekutku/ai-sre-agent/internal/version"
 )
 
@@ -44,8 +52,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	logger.Info("starting", "version", version.Version, "base_latency", cfg.baseLatency.String())
-	if err := run(ctx, logger, cfg); err != nil {
+	tp, shutdownTracing, err := telemetry.Setup(ctx, logger, "inventory-api", os.Getenv)
+	if err != nil {
+		logger.Error("telemetry setup failed", "error", err)
+		os.Exit(1)
+	}
+
+	logger.Info("starting", "version", version.Version, "base_latency", cfg.baseLatency.String(),
+		"tracing", telemetry.Enabled(os.Getenv))
+	err = run(ctx, logger, cfg, tp)
+	if serr := telemetry.Shutdown(shutdownTracing); serr != nil {
+		logger.Warn("telemetry shutdown failed", "error", serr)
+	}
+	if err != nil {
 		logger.Error("server failed", "error", err)
 		os.Exit(1)
 	}
@@ -53,14 +72,12 @@ func main() {
 
 // run serves the service and admin APIs until ctx is cancelled or either
 // server fails, in which case both are shut down.
-func run(ctx context.Context, logger *slog.Logger, cfg config) error {
+func run(ctx context.Context, logger *slog.Logger, cfg config, tp trace.TracerProvider) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	latency := inventory.NewLatency(cfg.baseLatency)
-	service := httpmetrics.Handler(httpmetrics.NewRegistry(), inventory.NewHandler(latency))
+	service, admin := handlers(logger, cfg, tp)
 	adminLogger := logger.With("component", "fault-admin")
-	admin := inventory.NewAdminHandler(adminLogger, latency)
 
 	errc := make(chan error, 2)
 	go func() { errc <- httpserver.Run(ctx, logger, cfg.addr, service) }()
@@ -69,6 +86,16 @@ func run(ctx context.Context, logger *slog.Logger, cfg config) error {
 	first := <-errc
 	cancel()
 	return errors.Join(first, <-errc)
+}
+
+// handlers returns the service API and the fault-injection admin API. The
+// admin API is neither instrumented nor traced, so fault state never appears
+// in metrics or traces (ADR 0001).
+func handlers(logger *slog.Logger, cfg config, tp trace.TracerProvider) (service, admin http.Handler) {
+	latency := inventory.NewLatency(cfg.baseLatency)
+	service = telemetry.Handler(tp, httpmetrics.Handler(httpmetrics.NewRegistry(), inventory.NewHandler(latency)), "/metrics")
+	admin = inventory.NewAdminHandler(logger.With("component", "fault-admin"), latency)
+	return service, admin
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
