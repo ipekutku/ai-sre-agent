@@ -22,6 +22,7 @@ type Environment struct {
 	InventoryURL      string
 	InventoryAdminURL string
 	PrometheusURL     string
+	TempoURL          string
 	HTTP              *http.Client
 }
 
@@ -29,7 +30,7 @@ type Environment struct {
 var pollInterval = 5 * time.Second
 
 // WaitReady blocks until both services are healthy, the fault API answers,
-// and Prometheus is scraping both services.
+// Prometheus is scraping both services, and Tempo is ready.
 func (e Environment) WaitReady(ctx context.Context) error {
 	checks := []struct {
 		name  string
@@ -48,6 +49,7 @@ func (e Environment) WaitReady(ctx context.Context) error {
 			}
 			return nil
 		}},
+		{"tempo", func(ctx context.Context) error { return e.get(ctx, e.TempoURL+"/ready") }},
 	}
 	for _, c := range checks {
 		if err := poll(ctx, func() error { return c.check(ctx) }); err != nil {

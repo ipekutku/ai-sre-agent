@@ -21,6 +21,7 @@ type fakeEnv struct {
 	promValue string
 	faults    []string // "PUT <body>" / "DELETE"
 	checkouts atomic.Int64
+	tempoUp   atomic.Bool
 }
 
 func (f *fakeEnv) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -29,6 +30,10 @@ func (f *fakeEnv) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	case r.URL.Path == "/checkout":
 		f.checkouts.Add(1)
+	case r.URL.Path == "/ready":
+		if !f.tempoUp.Load() {
+			http.Error(w, "Ingester not ready", http.StatusServiceUnavailable)
+		}
 	case r.URL.Path == "/fault":
 		body, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
@@ -56,7 +61,7 @@ func newEnv(t *testing.T, f *fakeEnv) Environment {
 	t.Helper()
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
-	return Environment{CheckoutURL: srv.URL, InventoryURL: srv.URL, InventoryAdminURL: srv.URL, PrometheusURL: srv.URL, HTTP: srv.Client()}
+	return Environment{CheckoutURL: srv.URL, InventoryURL: srv.URL, InventoryAdminURL: srv.URL, PrometheusURL: srv.URL, TempoURL: srv.URL, HTTP: srv.Client()}
 }
 
 func TestFaultLifecycle(t *testing.T) {
@@ -90,6 +95,13 @@ func TestWaitReady(t *testing.T) {
 	}
 
 	f.set("2")
+	ctx, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := env.WaitReady(ctx); err == nil || !strings.Contains(err.Error(), "tempo") {
+		t.Fatalf("err = %v, want tempo not ready", err)
+	}
+
+	f.tempoUp.Store(true)
 	if err := env.WaitReady(context.Background()); err != nil {
 		t.Fatalf("WaitReady: %v", err)
 	}

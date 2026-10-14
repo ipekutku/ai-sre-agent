@@ -22,10 +22,10 @@ direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
          |  /metrics       | /metrics    | LLM     | tools (internal/tools)
          v                 v             v         v
       +---------------------+    Claude API    query_metrics ----> Prometheus :9090
-      |  Prometheus :9090   |                  inspect_service --> /healthz + catalog
-      +---------------------+
+      |  Prometheus :9090   |                  query_traces -----> Tempo :3200
+      +---------------------+                  inspect_service --> /healthz + catalog
 
-  checkout-api, inventory-api --OTLP/HTTP spans--> Tempo :3200 (not yet queried by the agent)
+  checkout-api, inventory-api --OTLP/HTTP spans--> Tempo :3200
   checkout-api, inventory-api --OTLP/HTTP logs---> Loki  :3100 (not yet queried by the agent)
 ```
 
@@ -39,7 +39,7 @@ direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
 | Telemetry | `internal/telemetry` | OpenTelemetry setup (OTLP/HTTP export of spans and logs, each a no-op without an endpoint); server and client spans with W3C propagation; request IDs; access logs; the JSON logger with trace correlation |
 | Environment | `deploy/` | Docker Compose: both services, Prometheus (5 s scrape), Tempo, and Loki; ports on 127.0.0.1 |
 | Scenarios | `scenarios/<id>/`, `internal/scenarios` | incident, fault, alert trigger; environment control for the runner |
-| Tools | `internal/tools` | `query_metrics`, `inspect_service`, and the registry (validation, timeouts, size limits, logging) |
+| Tools | `internal/tools` | `query_metrics`, `query_traces`, `inspect_service`, and the registry (validation, timeouts, size limits, logging) |
 | LLM boundary | `internal/llm`, `internal/llm/anthropic` | provider-independent `Client`; Claude implementation |
 | Agent | `internal/agent` | investigation loop, budgets, `submit_diagnosis` validation, stats |
 | Diagnosis | `internal/diagnosis` | diagnosis schema and the closed root-cause code list |
@@ -49,8 +49,8 @@ direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
 ## Investigation flow
 
 1. The runner gives the agent an `incident.Incident` (alert name, service, severity, description).
-2. The agent sends Claude a fixed system prompt, the incident, and three tools:
-   `query_metrics`, `inspect_service`, `submit_diagnosis`.
+2. The agent sends Claude a fixed system prompt, the incident, and four tools:
+   `query_metrics`, `query_traces`, `inspect_service`, `submit_diagnosis`.
 3. Each `tool_use` is dispatched through the tool registry; every one gets a `tool_result`
    (failures are returned to the model as structured errors).
 4. The loop repeats until Claude calls `submit_diagnosis` with a valid diagnosis, or a budget
@@ -71,6 +71,9 @@ The agent must infer the cause from observations only.
 - The fault admin API is on a separate listener that is not instrumented or traced and is not in the
   agent's service catalog ([ADR 0001](adr/0001-fault-injection-admin-api.md)). Its logger writes
   to stdout only, so fault changes never reach Loki ([ADR 0004](adr/0004-log-backend-and-export.md)).
+- `query_traces` builds TraceQL from validated, structured input and returns only spans from
+  catalog services, so spans from any other source (such as the agent itself, once traced) never
+  reach the model ([ADR 0005](adr/0005-structured-trace-and-log-queries.md)).
 - The system prompt and incident text are tested to contain no scenario details.
 
 ## Evaluation
@@ -79,14 +82,15 @@ A diagnosis passes if it is valid (known root-cause code, at least one piece of 
 refers to the scenario's incident, and its code matches the ground truth exactly. Codes come
 from a fixed list ([ADR 0002](adr/0002-closed-root-cause-taxonomy.md)).
 
-The runner also reports investigation duration, LLM requests, tool calls (and failures),
-token usage, and estimated cost.
+The runner also reports investigation duration, LLM requests, tool calls (total, failed, and
+per tool), token usage, and estimated cost.
 
 ## Security boundaries
 
-- Tools are read-only: PromQL query endpoints only, and health endpoints from a fixed catalog.
+- Tools are read-only: PromQL query endpoints only, Tempo search and trace-by-ID endpoints only,
+  and health endpoints from a fixed catalog.
 - All model-generated tool input is decoded strictly and validated; unknown tools are rejected.
-- Tool output, Prometheus responses, and health responses are size-limited; every call has a timeout.
+- Tool output, Prometheus and Tempo responses, and health responses are size-limited; every call has a timeout.
 - The API key is read by the SDK from the environment and is never sent to the model or logged.
 - Fault injection has no authentication and relies on binding to 127.0.0.1; it is a local demo
   mechanism only.

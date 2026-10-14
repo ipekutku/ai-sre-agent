@@ -70,6 +70,9 @@ type Stats struct {
 	LLMRequests     int
 	ToolCalls       int
 	FailedToolCalls int
+	// ToolCallsByName counts executed tool calls (including failed ones) per
+	// requested tool name.
+	ToolCallsByName map[string]int
 	Duration        time.Duration
 	Usage           llm.Usage
 	// Models lists the models that served requests, in order of first use.
@@ -182,6 +185,10 @@ func (a *Agent) handleToolUses(ctx context.Context, log *slog.Logger, inc incide
 
 		r := a.tools.Call(ctx, use.ToolName, use.ToolInput)
 		stats.ToolCalls++
+		if stats.ToolCallsByName == nil {
+			stats.ToolCallsByName = map[string]int{}
+		}
+		stats.ToolCallsByName[use.ToolName]++
 		if r.Err != nil {
 			stats.FailedToolCalls++
 			results = append(results, errorResult(use.ToolUseID, string(r.Err.Code), r.Err.Message))

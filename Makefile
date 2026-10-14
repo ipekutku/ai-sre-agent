@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check vet test ci up down fault-inventory-latency fault-clear eval
+.PHONY: fmt fmt-check vet test ci up down fault-inventory-latency fault-clear eval eval-repeat
 
 COMPOSE := docker compose -f deploy/docker-compose.yml
 INVENTORY_ADMIN := http://127.0.0.1:9081
@@ -50,3 +50,21 @@ fault-clear:
 SCENARIO ?= scenarios/inventory-latency
 eval: up
 	go run ./cmd/scenario-runner -scenario $(SCENARIO) $(EVAL_ARGS)
+
+## eval-repeat: run SCENARIO RUNS times (default 3) and report how many passed; stops at
+##              the first setup error. The runner is built first because go run reports
+##              every failure as exit 1, hiding the difference between FAIL (1) and setup error (2).
+RUNS ?= 3
+eval-repeat: up
+	@case "$(RUNS)" in ''|*[!0-9]*|0) echo "RUNS must be a positive integer"; exit 2;; esac; \
+	dir="$$(mktemp -d)"; trap 'rm -rf "$$dir"' EXIT; \
+	go build -o "$$dir/scenario-runner" ./cmd/scenario-runner || exit 2; \
+	pass=0; \
+	for i in $$(seq 1 $(RUNS)); do \
+		echo "=== $(SCENARIO): run $$i of $(RUNS)"; \
+		"$$dir/scenario-runner" -scenario $(SCENARIO) $(EVAL_ARGS); code=$$?; \
+		if [ $$code -eq 0 ]; then pass=$$((pass + 1)); \
+		elif [ $$code -ne 1 ]; then echo "=== run $$i: setup error (exit $$code); stopping"; exit $$code; fi; \
+	done; \
+	echo "=== $(SCENARIO): $$pass of $(RUNS) runs passed"; \
+	[ $$pass -eq $(RUNS) ]

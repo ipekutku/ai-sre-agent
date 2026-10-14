@@ -203,6 +203,10 @@ func TestInvestigateToolBudget(t *testing.T) {
 	if tool.calls != 2 || res.Stats.ToolCalls != 2 {
 		t.Errorf("tool executed %d times (stats %d), want 2", tool.calls, res.Stats.ToolCalls)
 	}
+	// Calls rejected by the budget are not counted per tool either.
+	if !reflect.DeepEqual(res.Stats.ToolCallsByName, map[string]int{"inspect_service": 2}) {
+		t.Errorf("per-tool calls = %v", res.Stats.ToolCallsByName)
+	}
 	results := client.requests[1].Messages[2].Content
 	if len(results) != 3 {
 		t.Fatalf("every tool_use needs a tool_result, got %d", len(results))
