@@ -11,7 +11,10 @@ the agent never sees.
 
 ## Status
 
-**Milestone 1: Metrics-Based Incident Investigator** (complete, `v0.1.0`). Next: Milestone 2, multi-signal investigation (logs and traces).
+**Milestone 1: Metrics-Based Incident Investigator** (complete, `v0.1.0`).
+
+**Milestone 2: Multi-Signal Investigation** (in progress). Done so far: OpenTelemetry tracing of
+both services, stored in Grafana Tempo (see [Traces](#traces)).
 
 Done:
 
@@ -104,13 +107,14 @@ Configuration is via environment variables:
 | `INVENTORY_TIMEOUT` | checkout-api | `2s` |
 | `ADMIN_ADDR` | inventory-api | `127.0.0.1:9081` |
 | `BASE_LATENCY` | inventory-api | `20ms` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | both | unset (tracing off) |
 
 ## Local environment
 
 Requires Docker with the Compose plugin.
 
 ```bash
-make up     # build and start checkout-api, inventory-api, and Prometheus
+make up     # build and start checkout-api, inventory-api, Prometheus, and Tempo
 make down   # stop and remove the containers
 ```
 
@@ -119,6 +123,7 @@ make down   # stop and remove the containers
 | checkout-api | http://localhost:8080/checkout |
 | inventory-api | http://localhost:8081/inventory |
 | Prometheus | http://localhost:9090 |
+| Tempo (trace query API) | http://localhost:3200 |
 | inventory-api fault admin | http://localhost:9081/fault |
 
 Ports are bound to `127.0.0.1` only. Prometheus scrapes every 5s
@@ -127,7 +132,7 @@ Ports are bound to `127.0.0.1` only. Prometheus scrapes every 5s
 ## Fault injection
 
 `inventory-api` serves a fault-injection admin API on a separate port (`ADMIN_ADDR`). It is not
-instrumented, so fault state never appears in metrics. See
+instrumented or traced, so fault state never appears in metrics or traces. See
 [ADR 0001](docs/adr/0001-fault-injection-admin-api.md) for why.
 
 ```bash
@@ -192,6 +197,35 @@ histogram_quantile(0.95, sum by (le) (rate(http_client_request_duration_seconds_
 # inventory-api server latency (p95)
 histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{job="inventory-api", route="/inventory"}[1m])))
 ```
+
+## Traces
+
+Both services are traced with OpenTelemetry ([`internal/telemetry`](internal/telemetry)) when
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set, as it is in Compose. Spans are pushed over OTLP/HTTP to
+[Tempo](https://grafana.com/oss/tempo/) ([`deploy/tempo/tempo.yaml`](deploy/tempo/tempo.yaml)),
+and W3C trace context is propagated from checkout-api to inventory-api, so one checkout request is
+one trace:
+
+```text
+GET /checkout          checkout-api   server span
+└── GET inventory-api  checkout-api   client span (the call to inventory-api)
+    └── GET /inventory inventory-api  server span
+```
+
+Server spans are named after the route pattern. `/metrics` scrapes and the fault admin API are
+not traced. Spans become searchable in Tempo about 20-30 s after the request:
+
+```bash
+# slow checkout traces from the last 10 minutes
+curl -G localhost:3200/api/search \
+  --data-urlencode 'q={ resource.service.name = "checkout-api" && duration > 500ms }' \
+  --data-urlencode "start=$(( $(date +%s) - 600 ))" --data-urlencode "end=$(date +%s)"
+
+# one trace by ID
+curl localhost:3200/api/v2/traces/<trace-id>
+```
+
+The agent cannot query traces yet; a `query_traces` tool is planned for Milestone 2.
 
 ## Requirements
 
