@@ -2,7 +2,7 @@
 // local environment (make up) and evaluates the agent's diagnosis:
 //
 //	wait for environment -> generate traffic -> baseline -> inject fault ->
-//	wait for alert condition -> investigate -> evaluate -> clean up
+//	wait for alert condition -> wait for traces -> investigate -> evaluate -> clean up
 //
 // The runner reads both scenario.yaml and ground-truth.yaml. The agent only
 // receives the scenario's incident.
@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,6 +39,7 @@ type options struct {
 	inventoryURL   string
 	adminURL       string
 	prometheusURL  string
+	tempoURL       string
 	model          string
 	effort         string
 	rps            int
@@ -53,6 +56,7 @@ func main() {
 	flag.StringVar(&o.inventoryURL, "inventory-url", "http://127.0.0.1:8081", "inventory-api base URL")
 	flag.StringVar(&o.adminURL, "inventory-admin-url", "http://127.0.0.1:9081", "inventory-api fault admin URL (runner only)")
 	flag.StringVar(&o.prometheusURL, "prometheus-url", "http://127.0.0.1:9090", "Prometheus base URL")
+	flag.StringVar(&o.tempoURL, "tempo-url", "http://127.0.0.1:3200", "Tempo base URL")
 	flag.StringVar(&o.model, "model", anthropic.DefaultModel, "Claude model ID")
 	flag.StringVar(&o.effort, "effort", "medium", "effort: low, medium, high, xhigh, max")
 	flag.IntVar(&o.rps, "rps", 20, "checkout requests per second during the scenario")
@@ -104,23 +108,32 @@ func run(ctx context.Context, logger *slog.Logger, out io.Writer, o options) (bo
 	hc := &http.Client{Timeout: 10 * time.Second}
 	env := scenarios.Environment{
 		CheckoutURL: o.checkoutURL, InventoryURL: o.inventoryURL,
-		InventoryAdminURL: o.adminURL, PrometheusURL: o.prometheusURL, HTTP: hc,
+		InventoryAdminURL: o.adminURL, PrometheusURL: o.prometheusURL, TempoURL: o.tempoURL, HTTP: hc,
 	}
 
-	// The agent's view of the system: metrics and the service catalog.
-	// The fault admin URL is deliberately absent.
+	// The agent's view of the system: metrics, traces, and the service
+	// catalog. The fault admin URL is deliberately absent.
+	catalog := []tools.ServiceEntry{
+		{Name: "checkout-api", BaseURL: o.checkoutURL, Dependencies: []string{"inventory-api"}},
+		{Name: "inventory-api", BaseURL: o.inventoryURL},
+	}
+	services := make([]string, len(catalog))
+	for i, s := range catalog {
+		services[i] = s.Name
+	}
 	qm, err := tools.NewQueryMetrics(o.prometheusURL, hc)
 	if err != nil {
 		return false, err
 	}
-	is, err := tools.NewInspectService([]tools.ServiceEntry{
-		{Name: "checkout-api", BaseURL: o.checkoutURL, Dependencies: []string{"inventory-api"}},
-		{Name: "inventory-api", BaseURL: o.inventoryURL},
-	}, hc)
+	qt, err := tools.NewQueryTraces(o.tempoURL, services, hc)
 	if err != nil {
 		return false, err
 	}
-	registry, err := tools.NewRegistry(logger, tools.Options{}, qm, is)
+	is, err := tools.NewInspectService(catalog, hc)
+	if err != nil {
+		return false, err
+	}
+	registry, err := tools.NewRegistry(logger, tools.Options{}, qm, qt, is)
 	if err != nil {
 		return false, err
 	}
@@ -160,7 +173,8 @@ func run(ctx context.Context, logger *slog.Logger, out io.Writer, o options) (bo
 		return false, err
 	}
 
-	// 4. Fault, then wait until the alert condition is observable.
+	// 4. Fault, then wait until the alert condition is observable and the
+	// trace backend has caught up.
 	logger.Info("injecting fault", "service", sc.Fault.Service, "type", sc.Fault.Type)
 	if err := env.ApplyFault(ctx, sc.Fault); err != nil {
 		return false, fmt.Errorf("inject fault: %w", err)
@@ -169,7 +183,18 @@ func run(ctx context.Context, logger *slog.Logger, out io.Writer, o options) (bo
 	if err != nil {
 		return false, err
 	}
-	logger.Info("alert condition met; raising incident", "value", value, "incident_id", sc.Incident.IncidentID)
+	triggered := time.Now()
+	logger.Info("alert condition met; waiting for traces to be searchable", "value", value)
+
+	// The agent should be able to see traces of the incident it is given.
+	tracesCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	err = env.WaitForTraces(tracesCtx, sc.Incident.Service, triggered)
+	cancel()
+	if err != nil {
+		return false, fmt.Errorf("traces not searchable in tempo: %w", err)
+	}
+	logger.Info("raising incident", "incident_id", sc.Incident.IncidentID,
+		"trace_wait", time.Since(triggered).Round(100*time.Millisecond))
 
 	// 5. Investigate. The agent receives only the incident.
 	result, invErr := investigator.Investigate(ctx, sc.Incident)
@@ -204,7 +229,7 @@ func writeDetails(w io.Writer, r agent.Result, t scenarios.TrafficStats) {
 	fmt.Fprintf(w, "  models:          %v\n", s.Models)
 	fmt.Fprintf(w, "  duration:        %s\n", s.Duration.Round(100*time.Millisecond))
 	fmt.Fprintf(w, "  llm requests:    %d\n", s.LLMRequests)
-	fmt.Fprintf(w, "  tool calls:      %d (%d failed)\n", s.ToolCalls, s.FailedToolCalls)
+	fmt.Fprintf(w, "  tool calls:      %d (%d failed)%s\n", s.ToolCalls, s.FailedToolCalls, toolBreakdown(s.ToolCallsByName))
 	fmt.Fprintf(w, "  tokens:          %d in, %d out, %d cache read, %d cache write\n",
 		s.Usage.InputTokens, s.Usage.OutputTokens, s.Usage.CacheReadTokens, s.Usage.CacheWriteTokens)
 	fmt.Fprintf(w, "  estimated cost:  %s\n", cost)
@@ -222,6 +247,23 @@ func writeDetails(w io.Writer, r agent.Result, t scenarios.TrafficStats) {
 			fmt.Fprintf(w, "  - %s\n", a)
 		}
 	}
+}
+
+// toolBreakdown formats per-tool call counts as ": a=1, b=2", sorted by name.
+func toolBreakdown(counts map[string]int) string {
+	if len(counts) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(counts))
+	for n := range counts {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	parts := make([]string, len(names))
+	for i, n := range names {
+		parts[i] = fmt.Sprintf("%s=%d", n, counts[n])
+	}
+	return ": " + strings.Join(parts, ", ")
 }
 
 func writeList(w io.Writer, title string, ev []diagnosis.Evidence) {
