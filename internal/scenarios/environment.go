@@ -23,6 +23,7 @@ type Environment struct {
 	InventoryAdminURL string
 	PrometheusURL     string
 	TempoURL          string
+	LokiURL           string
 	HTTP              *http.Client
 }
 
@@ -30,7 +31,7 @@ type Environment struct {
 var pollInterval = 5 * time.Second
 
 // WaitReady blocks until both services are healthy, the fault API answers,
-// Prometheus is scraping both services, and Tempo is ready.
+// Prometheus is scraping both services, and Tempo and Loki are ready.
 func (e Environment) WaitReady(ctx context.Context) error {
 	checks := []struct {
 		name  string
@@ -50,6 +51,7 @@ func (e Environment) WaitReady(ctx context.Context) error {
 			return nil
 		}},
 		{"tempo", func(ctx context.Context) error { return e.get(ctx, e.TempoURL+"/ready") }},
+		{"loki", func(ctx context.Context) error { return e.get(ctx, e.LokiURL+"/ready") }},
 	}
 	for _, c := range checks {
 		if err := poll(ctx, func() error { return c.check(ctx) }); err != nil {
@@ -179,6 +181,49 @@ func (e Environment) WaitForTraces(ctx context.Context, service string, since ti
 			}
 		}
 		return fmt.Errorf("no %s trace since %s is searchable yet", service, since.Format(time.RFC3339))
+	})
+}
+
+// WaitForLogs blocks until Loki returns a log entry from service logged at
+// or after since. Like WaitForTraces, it checks only that the backend has
+// caught up, not what the entries contain.
+func (e Environment) WaitForLogs(ctx context.Context, service string, since time.Time) error {
+	params := url.Values{
+		"query":     {"{service_name=" + strconv.Quote(service) + "}"},
+		"start":     {strconv.FormatInt(since.UnixNano(), 10)},
+		"limit":     {"1"},
+		"direction": {"backward"},
+	}
+	return poll(ctx, func() error {
+		params.Set("end", strconv.FormatInt(time.Now().Add(time.Second).UnixNano(), 10))
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.LokiURL+"/loki/api/v1/query_range?"+params.Encode(), nil)
+		if err != nil {
+			return err
+		}
+		resp, err := e.HTTP.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("loki query: HTTP %d", resp.StatusCode)
+		}
+		var lr struct {
+			Data struct {
+				Result []struct {
+					Values [][2]string `json:"values"`
+				} `json:"result"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&lr); err != nil {
+			return fmt.Errorf("decode loki response: %w", err)
+		}
+		for _, s := range lr.Data.Result {
+			if len(s.Values) > 0 {
+				return nil
+			}
+		}
+		return fmt.Errorf("no %s log entry since %s is searchable yet", service, since.Format(time.RFC3339))
 	})
 }
 

@@ -5,7 +5,7 @@
 An AI SRE / incident investigation agent written in Go.
 
 The agent investigates incidents by gathering evidence through explicit, constrained tools
-(metrics, service metadata, and later logs, traces, and infrastructure state), then produces a
+(metrics, traces, logs, service metadata, and later infrastructure state), then produces a
 structured, evidence-backed diagnosis. Diagnoses are scored against scenario ground truth that
 the agent never sees.
 
@@ -15,22 +15,24 @@ the agent never sees.
 
 **Milestone 2: Multi-Signal Investigation** (in progress). Done so far: OpenTelemetry tracing of
 both services, stored in Grafana Tempo (see [Traces](#traces)), and structured, trace-correlated
-logs, stored in Grafana Loki (see [Logs](#logs)). The agent can query traces with `query_traces`.
+logs, stored in Grafana Loki (see [Logs](#logs)). The agent can query traces with `query_traces`
+and logs with `query_logs`.
 
 Done:
 
 - `checkout-api` and `inventory-api` run under Docker Compose, instrumented with Prometheus metrics
 - deterministic latency fault injection in `inventory-api`
 - the `inventory-latency` scenario, its ground truth, the diagnosis schema, and the evaluator
-- the `query_metrics`, `query_traces`, and `inspect_service` investigation tools
+- the `query_metrics`, `query_traces`, `query_logs`, and `inspect_service` investigation tools
 - a provider-independent LLM client interface, implemented for Claude (default `claude-sonnet-5-5`)
 - the investigation loop (`internal/agent`): tool dispatch, budgets, timeout, and a validated
   diagnosis chosen from a fixed list of root-cause codes ([ADR 0002](docs/adr/0002-closed-root-cause-taxonomy.md))
 - `make eval`: the scenario end to end, from fault injection to PASS/FAIL
 
-As of 2026-10-14 (`claude-sonnet-5-5`), `make eval-repeat` has passed 8 of 8 runs against the real
-API. The agent identifies `INVENTORY_DOWNSTREAM_LATENCY` by combining metrics with traces: it used
-`query_traces` in 7 of the 8 runs, at about $0.02–$0.035 per run.
+As of 2026-10-15 (`claude-sonnet-5-5`), `make eval-repeat` has passed 11 of 11 runs against the
+real API. The agent identifies `INVENTORY_DOWNSTREAM_LATENCY` by combining metrics with traces: it
+used `query_traces` in 10 of the 11 runs, at about $0.02–$0.035 per run. Since `query_logs` was
+added, it has used logs in 1 of 3 runs, to confirm there were no errors.
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan.
 
 ## Running the demo
@@ -45,12 +47,12 @@ make eval
 `make eval` starts the environment (`make up`) and runs
 [`cmd/scenario-runner`](cmd/scenario-runner), which:
 
-1. waits until the services, Prometheus, and Tempo are ready, and clears any leftover fault
+1. waits until the services, Prometheus, Tempo, and Loki are ready, and clears any leftover fault
 2. sends steady `GET /checkout` traffic (20 rps) and records a 60 s baseline
 3. injects the scenario's fault (inventory-api responds in 800 ms)
 4. waits until the alert condition holds in Prometheus (checkout-api p95 > 500 ms), then until
-   Tempo can return a trace of the alerted service that started after that point, so the agent
-   never investigates before traces are searchable
+   Tempo and Loki can return a trace and a log entry of the alerted service from after that point,
+   so the agent never investigates before traces and logs are searchable
 5. gives the agent the incident only; the agent investigates through its tools
 6. compares the diagnosis with `ground-truth.yaml`, prints the report, and clears the fault
 
@@ -72,7 +74,7 @@ Investigation:
   models:          [claude-sonnet-5-5]
   duration:        ...
   llm requests:    ...
-  tool calls:      ... (0 failed): inspect_service=..., query_metrics=..., query_traces=...
+  tool calls:      ... (0 failed): inspect_service=..., query_logs=..., query_metrics=..., query_traces=...
   tokens:          ...
   estimated cost:  $...
 ```
@@ -83,7 +85,7 @@ Without credentials the runner stops immediately. `make down` stops the environm
 
 The model's choices vary from run to run, so a single PASS says little. `make eval-repeat RUNS=5`
 runs the scenario five times and prints how many passed. It exits non-zero if any run failed, and
-stops at the first setup error. Runs share Prometheus and Tempo, so an investigation's range
+stops at the first setup error. Runs share Prometheus, Tempo, and Loki, so an investigation's range
 queries can also see earlier runs' faults. A cooldown between runs (`COOLDOWN`, default 300 s)
 gives each fault its own spike, separated by normal traffic. Each run takes about 2 minutes, so
 with the cooldown five runs take about 30 minutes. `COOLDOWN=0` skips it, for example when the
@@ -184,6 +186,7 @@ The agent can only observe the system through these tools ([`internal/tools`](in
 |---|---|---|
 | `query_metrics` | read-only PromQL (instant, or a range over the last N minutes) against a fixed Prometheus URL | query ≤ 1000 chars, range ≤ 60 min, ≤ 20 series, ≤ 30 points/series, 2 MiB response cap |
 | `query_traces` | structured trace search (by service, minimum span duration, error status) or one trace by ID, against a fixed Tempo URL; the tool builds the TraceQL | catalog services only; lookback ≤ 60 min, ≤ 20 traces, ≤ 3 matching spans per trace, ≤ 50 spans per trace, allowlisted span attributes, 2 MiB response cap |
+| `query_logs` | structured log search (by service, minimum severity, message text, trace ID, request ID) against a fixed Loki URL; the tool builds the LogQL | catalog services only, fault-admin entries always dropped; text ≤ 200 chars, lookback ≤ 60 min, ≤ 50 entries, allowlisted attributes, 2 MiB response cap |
 | `inspect_service` | name, health status, version (from `GET /healthz`), and dependencies (from a fixed catalog) | catalog services only; never sees admin/fault endpoints |
 
 All calls go through a registry that enforces a per-call timeout and output-size limit, logs each
@@ -191,9 +194,11 @@ call with its latency, and returns failures as structured errors (`unknown_tool`
 `timeout`, `output_too_large`, `execution_failed`) the model can react to. The runner reports how
 many times each tool was called.
 
-`query_traces` does not accept raw TraceQL. Tempo will also store the agent's own spans, so the
-tool returns only spans from services in the catalog and hides trace roots from any other
-service ([ADR 0005](docs/adr/0005-structured-trace-and-log-queries.md)).
+`query_traces` and `query_logs` do not accept raw TraceQL or LogQL. Tempo will also store the
+agent's own spans, so `query_traces` returns only spans from services in the catalog and hides
+trace roots from any other service. `query_logs` likewise returns only entries from catalog
+services, and drops fault-admin entries even though they are never exported
+([ADR 0005](docs/adr/0005-structured-trace-and-log-queries.md)).
 
 ## Metrics
 
@@ -281,7 +286,8 @@ curl -G localhost:3100/loki/api/v1/query_range \
   --data-urlencode "start=$(( $(date +%s) - 600 ))000000000"
 ```
 
-The agent cannot query logs yet; a `query_logs` tool is planned for Milestone 2.
+Entries are usually searchable in Loki within a few seconds. The agent reads logs through the
+[`query_logs`](#investigation-tools) tool.
 
 ## Requirements
 

@@ -2,7 +2,7 @@
 // local environment (make up) and evaluates the agent's diagnosis:
 //
 //	wait for environment -> generate traffic -> baseline -> inject fault ->
-//	wait for alert condition -> wait for traces -> investigate -> evaluate -> clean up
+//	wait for alert condition -> wait for traces and logs -> investigate -> evaluate -> clean up
 //
 // The runner reads both scenario.yaml and ground-truth.yaml. The agent only
 // receives the scenario's incident.
@@ -40,6 +40,7 @@ type options struct {
 	adminURL       string
 	prometheusURL  string
 	tempoURL       string
+	lokiURL        string
 	model          string
 	effort         string
 	rps            int
@@ -57,6 +58,7 @@ func main() {
 	flag.StringVar(&o.adminURL, "inventory-admin-url", "http://127.0.0.1:9081", "inventory-api fault admin URL (runner only)")
 	flag.StringVar(&o.prometheusURL, "prometheus-url", "http://127.0.0.1:9090", "Prometheus base URL")
 	flag.StringVar(&o.tempoURL, "tempo-url", "http://127.0.0.1:3200", "Tempo base URL")
+	flag.StringVar(&o.lokiURL, "loki-url", "http://127.0.0.1:3100", "Loki base URL")
 	flag.StringVar(&o.model, "model", anthropic.DefaultModel, "Claude model ID")
 	flag.StringVar(&o.effort, "effort", "medium", "effort: low, medium, high, xhigh, max")
 	flag.IntVar(&o.rps, "rps", 20, "checkout requests per second during the scenario")
@@ -108,10 +110,10 @@ func run(ctx context.Context, logger *slog.Logger, out io.Writer, o options) (bo
 	hc := &http.Client{Timeout: 10 * time.Second}
 	env := scenarios.Environment{
 		CheckoutURL: o.checkoutURL, InventoryURL: o.inventoryURL,
-		InventoryAdminURL: o.adminURL, PrometheusURL: o.prometheusURL, TempoURL: o.tempoURL, HTTP: hc,
+		InventoryAdminURL: o.adminURL, PrometheusURL: o.prometheusURL, TempoURL: o.tempoURL, LokiURL: o.lokiURL, HTTP: hc,
 	}
 
-	// The agent's view of the system: metrics, traces, and the service
+	// The agent's view of the system: metrics, traces, logs, and the service
 	// catalog. The fault admin URL is deliberately absent.
 	catalog := []tools.ServiceEntry{
 		{Name: "checkout-api", BaseURL: o.checkoutURL, Dependencies: []string{"inventory-api"}},
@@ -129,11 +131,15 @@ func run(ctx context.Context, logger *slog.Logger, out io.Writer, o options) (bo
 	if err != nil {
 		return false, err
 	}
+	ql, err := tools.NewQueryLogs(o.lokiURL, services, hc)
+	if err != nil {
+		return false, err
+	}
 	is, err := tools.NewInspectService(catalog, hc)
 	if err != nil {
 		return false, err
 	}
-	registry, err := tools.NewRegistry(logger, tools.Options{}, qm, qt, is)
+	registry, err := tools.NewRegistry(logger, tools.Options{}, qm, qt, ql, is)
 	if err != nil {
 		return false, err
 	}
@@ -174,7 +180,7 @@ func run(ctx context.Context, logger *slog.Logger, out io.Writer, o options) (bo
 	}
 
 	// 4. Fault, then wait until the alert condition is observable and the
-	// trace backend has caught up.
+	// trace and log backends have caught up.
 	logger.Info("injecting fault", "service", sc.Fault.Service, "type", sc.Fault.Type)
 	if err := env.ApplyFault(ctx, sc.Fault); err != nil {
 		return false, fmt.Errorf("inject fault: %w", err)
@@ -184,17 +190,24 @@ func run(ctx context.Context, logger *slog.Logger, out io.Writer, o options) (bo
 		return false, err
 	}
 	triggered := time.Now()
-	logger.Info("alert condition met; waiting for traces to be searchable", "value", value)
+	logger.Info("alert condition met; waiting for traces and logs to be searchable", "value", value)
 
-	// The agent should be able to see traces of the incident it is given.
-	tracesCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	err = env.WaitForTraces(tracesCtx, sc.Incident.Service, triggered)
-	cancel()
-	if err != nil {
+	// The agent should be able to see traces and logs of the incident it is
+	// given. Logs are usually searchable before traces, so the second wait is
+	// normally immediate.
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	if err := env.WaitForTraces(waitCtx, sc.Incident.Service, triggered); err != nil {
 		return false, fmt.Errorf("traces not searchable in tempo: %w", err)
 	}
+	traceWait := time.Since(triggered)
+	if err := env.WaitForLogs(waitCtx, sc.Incident.Service, triggered); err != nil {
+		return false, fmt.Errorf("logs not searchable in loki: %w", err)
+	}
+	cancel()
 	logger.Info("raising incident", "incident_id", sc.Incident.IncidentID,
-		"trace_wait", time.Since(triggered).Round(100*time.Millisecond))
+		"trace_wait", traceWait.Round(100*time.Millisecond),
+		"total_wait", time.Since(triggered).Round(100*time.Millisecond))
 
 	// 5. Investigate. The agent receives only the incident.
 	result, invErr := investigator.Investigate(ctx, sc.Incident)

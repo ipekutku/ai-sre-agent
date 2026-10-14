@@ -29,6 +29,10 @@ type fakeEnv struct {
 	// returns; 0 means no traces.
 	traceStart atomic.Int64
 	search     url.Values
+	lokiUp     atomic.Bool
+	// logEntries is whether Loki returns an entry; logQuery is the last query.
+	logEntries atomic.Bool
+	logQuery   url.Values
 }
 
 func (f *fakeEnv) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -46,6 +50,20 @@ func (f *fakeEnv) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_, _ = w.Write([]byte(`{"traces":[]}`))
+	// Loki is served under /loki (see newEnv) so its /ready differs from Tempo's.
+	case r.URL.Path == "/loki/ready":
+		if !f.lokiUp.Load() {
+			http.Error(w, "Ingester not ready", http.StatusServiceUnavailable)
+		}
+	case r.URL.Path == "/loki/loki/api/v1/query_range":
+		f.mu.Lock()
+		f.logQuery = r.URL.Query()
+		f.mu.Unlock()
+		if f.logEntries.Load() {
+			_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[{"stream":{},"values":[["1","request"]]}]}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[]}}`))
 	case r.URL.Path == "/ready":
 		if !f.tempoUp.Load() {
 			http.Error(w, "Ingester not ready", http.StatusServiceUnavailable)
@@ -77,7 +95,7 @@ func newEnv(t *testing.T, f *fakeEnv) Environment {
 	t.Helper()
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
-	return Environment{CheckoutURL: srv.URL, InventoryURL: srv.URL, InventoryAdminURL: srv.URL, PrometheusURL: srv.URL, TempoURL: srv.URL, HTTP: srv.Client()}
+	return Environment{CheckoutURL: srv.URL, InventoryURL: srv.URL, InventoryAdminURL: srv.URL, PrometheusURL: srv.URL, TempoURL: srv.URL, LokiURL: srv.URL + "/loki", HTTP: srv.Client()}
 }
 
 func TestFaultLifecycle(t *testing.T) {
@@ -118,6 +136,13 @@ func TestWaitReady(t *testing.T) {
 	}
 
 	f.tempoUp.Store(true)
+	ctx, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := env.WaitReady(ctx); err == nil || !strings.Contains(err.Error(), "loki") {
+		t.Fatalf("err = %v, want loki not ready", err)
+	}
+
+	f.lokiUp.Store(true)
 	if err := env.WaitReady(context.Background()); err != nil {
 		t.Fatalf("WaitReady: %v", err)
 	}
@@ -175,6 +200,36 @@ func TestWaitForTraces(t *testing.T) {
 	}
 	if f.search.Get("start") != strconv.FormatInt(since.Unix(), 10) {
 		t.Errorf("start = %s, want %d", f.search.Get("start"), since.Unix())
+	}
+}
+
+func TestWaitForLogs(t *testing.T) {
+	f := &fakeEnv{}
+	env := newEnv(t, f)
+	since := time.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	err := env.WaitForLogs(ctx, "checkout-api", since)
+	cancel()
+	if err == nil || !strings.Contains(err.Error(), "no checkout-api log entry") {
+		t.Errorf("err = %v, want not searchable yet", err)
+	}
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		f.logEntries.Store(true)
+	}()
+	if err := env.WaitForLogs(context.Background(), "checkout-api", since); err != nil {
+		t.Fatalf("WaitForLogs: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if q := f.logQuery.Get("query"); q != `{service_name="checkout-api"}` {
+		t.Errorf("query = %s", q)
+	}
+	// Only entries logged since the trigger count.
+	if f.logQuery.Get("start") != strconv.FormatInt(since.UnixNano(), 10) {
+		t.Errorf("start = %s, want %d", f.logQuery.Get("start"), since.UnixNano())
 	}
 }
 
