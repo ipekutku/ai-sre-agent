@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check vet test ci up down fault-inventory-latency fault-inventory-errors fault-clear eval eval-repeat
+.PHONY: fmt fmt-check vet test ci up down fault-inventory-latency fault-inventory-errors fault-clear eval eval-repeat eval-all
 
 COMPOSE := docker compose -f deploy/docker-compose.yml
 INVENTORY_ADMIN := http://127.0.0.1:9081
@@ -57,8 +57,8 @@ fault-inventory-errors:
 fault-clear:
 	@curl -fsS -X DELETE $(INVENTORY_ADMIN)/fault
 
-## eval: start the environment and run the inventory-latency scenario end to end
-##       (needs ANTHROPIC_API_KEY; pass runner flags with EVAL_ARGS="-effort high").
+## eval: start the environment and run SCENARIO (default scenarios/inventory-latency) end to
+##       end (needs ANTHROPIC_API_KEY; pass runner flags with EVAL_ARGS="-effort high").
 ##       The investigation is traced to Tempo; the report prints its trace ID.
 SCENARIO ?= scenarios/inventory-latency
 eval: up
@@ -86,3 +86,26 @@ eval-repeat: up
 	done; \
 	echo "=== $(SCENARIO): $$pass of $(RUNS) runs passed"; \
 	[ $$pass -eq $(RUNS) ]
+
+## eval-all: run every scenario in scenarios/ once and print PASS or FAIL for each; stops at
+##           the first setup error. Waits COOLDOWN seconds (default 300) between scenarios
+##           so one scenario's fault has faded from the 30 s alert windows, and shows up as a
+##           separate spike, before the next starts.
+eval-all: up
+	@case "$(COOLDOWN)" in ''|*[!0-9]*) echo "COOLDOWN must be a whole number of seconds"; exit 2;; esac; \
+	dir="$$(mktemp -d)"; trap 'rm -rf "$$dir"' EXIT; \
+	go build -o "$$dir/scenario-runner" ./cmd/scenario-runner || exit 2; \
+	results=""; failed=0; first=1; \
+	for sc in scenarios/*/; do \
+		sc="$${sc%/}"; \
+		if [ $$first -eq 0 ] && [ $(COOLDOWN) -gt 0 ]; then echo "=== cooling down for $(COOLDOWN)s"; sleep $(COOLDOWN); fi; \
+		first=0; \
+		echo "=== $$sc"; \
+		$(RUNNER_ENV) "$$dir/scenario-runner" -scenario "$$sc" $(EVAL_ARGS); code=$$?; \
+		if [ $$code -eq 0 ]; then verdict=PASS; \
+		elif [ $$code -eq 1 ]; then verdict=FAIL; failed=$$((failed + 1)); \
+		else echo "=== $$sc: setup error (exit $$code); stopping"; exit $$code; fi; \
+		results="$$results$$verdict  $$sc\n"; \
+	done; \
+	echo "=== results"; printf "%b" "$$results"; \
+	[ $$failed -eq 0 ]

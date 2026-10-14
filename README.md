@@ -23,17 +23,21 @@ Done:
 
 - `checkout-api` and `inventory-api` run under Docker Compose, instrumented with Prometheus metrics
 - deterministic latency and HTTP-error fault injection in `inventory-api`
-- the `inventory-latency` scenario, its ground truth, the diagnosis schema, and the evaluator
+- the `inventory-latency` and `inventory-errors` scenarios, their ground truth, the diagnosis
+  schema, and the evaluator
 - the `query_metrics`, `query_traces`, `query_logs`, and `inspect_service` investigation tools
 - a provider-independent LLM client interface, implemented for Claude (default `claude-sonnet-5-5`)
 - the investigation loop (`internal/agent`): tool dispatch, budgets, timeout, and a validated
   diagnosis chosen from a fixed list of root-cause codes ([ADR 0002](docs/adr/0002-closed-root-cause-taxonomy.md))
-- `make eval`: the scenario end to end, from fault injection to PASS/FAIL
+- `make eval`: one scenario end to end, from fault injection to PASS/FAIL; `make eval-all` runs
+  them all
 
 As of 2026-10-15 (`claude-sonnet-5-5`), `make eval-repeat` has passed 11 of 11 runs against the
 real API. The agent identifies `INVENTORY_DOWNSTREAM_LATENCY` by combining metrics with traces: it
 used `query_traces` in 10 of the 11 runs, at about $0.02–$0.035 per run. Since `query_logs` was
-added, it has used logs in 1 of 3 runs, to confirm there were no errors.
+added, it has used logs in 1 of 3 runs, to confirm there were no errors. The `inventory-errors`
+scenario passed 4 of 4 runs, at about $0.026–$0.034 per run. The agent queried error logs every
+time and linked each checkout-api 502 to an inventory-api 500 through the trace ID.
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan.
 
 ## Running the demo
@@ -46,12 +50,14 @@ make eval
 ```
 
 `make eval` starts the environment (`make up`) and runs
-[`cmd/scenario-runner`](cmd/scenario-runner), which:
+[`cmd/scenario-runner`](cmd/scenario-runner) on the `inventory-latency` scenario (choose another
+with `SCENARIO=scenarios/<id>`). The runner:
 
 1. waits until the services, Prometheus, Tempo, and Loki are ready, and clears any leftover fault
 2. sends steady `GET /checkout` traffic (20 rps) and records a 60 s baseline
-3. injects the scenario's fault (inventory-api responds in 800 ms)
-4. waits until the alert condition holds in Prometheus (checkout-api p95 > 500 ms), then until
+3. injects the scenario's fault (for `inventory-latency`, inventory-api responds in 800 ms)
+4. waits until the scenario's alert condition holds in Prometheus (for `inventory-latency`,
+   checkout-api p95 > 500 ms), then until
    Tempo and Loki can return a trace and a log entry of the alerted service from after that point,
    so the agent never investigates before traces and logs are searchable
 5. gives the agent the incident only; the agent investigates through its tools
@@ -96,6 +102,10 @@ queries can also see earlier runs' faults. A cooldown between runs (`COOLDOWN`, 
 gives each fault its own spike, separated by normal traffic. Each run takes about 2 minutes, so
 with the cooldown five runs take about 30 minutes. `COOLDOWN=0` skips it, for example when the
 timeline doesn't matter.
+
+`make eval-all` runs every scenario once, with the same cooldown between scenarios, then lists
+PASS or FAIL for each. It exits non-zero if any scenario failed, and stops at the first setup
+error. Two scenarios take about 10 minutes.
 
 ## Demo services
 
@@ -187,6 +197,11 @@ Each incident scenario lives in [`scenarios/<id>/`](scenarios/):
 |---|---|---|
 | `scenario.yaml` | the incident to raise and the fault to inject | scenario runner (`internal/scenarios`) |
 | `ground-truth.yaml` | the expected root-cause code | evaluator only (`internal/evaluation`) |
+
+| Scenario | Alert (what the agent is told) | Fault | Raised when |
+|---|---|---|---|
+| `inventory-latency` | `HighCheckoutLatency` on checkout-api | inventory-api responds in 800 ms | checkout-api p95 > 500 ms |
+| `inventory-errors` | `HighCheckoutErrorRate` on checkout-api | 50% of inventory-api requests return 500 | checkout-api 5xx ratio > 20% |
 
 The investigation agent receives only the scenario's `incident` (alert, service, severity,
 description), which describes the symptom and never the cause. The evaluator passes a diagnosis
