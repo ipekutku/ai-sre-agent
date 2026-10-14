@@ -115,7 +115,7 @@ func TestCheckoutInventoryTrace(t *testing.T) {
 	logger := discardLogger()
 
 	inventorySrv := httptest.NewServer(Handler(tp, logger,
-		httpmetrics.Handler(httpmetrics.NewRegistry(), inventory.NewHandler(inventory.NewLatency(0))), "/metrics"))
+		httpmetrics.Handler(httpmetrics.NewRegistry(), inventory.NewHandler(logger, inventory.NewFaults(0))), "/metrics"))
 	defer inventorySrv.Close()
 
 	reg := httpmetrics.NewRegistry()

@@ -22,7 +22,7 @@ and logs with `query_logs`, and each investigation is itself traced (see
 Done:
 
 - `checkout-api` and `inventory-api` run under Docker Compose, instrumented with Prometheus metrics
-- deterministic latency fault injection in `inventory-api`
+- deterministic latency and HTTP-error fault injection in `inventory-api`
 - the `inventory-latency` scenario, its ground truth, the diagnosis schema, and the evaluator
 - the `query_metrics`, `query_traces`, `query_logs`, and `inspect_service` investigation tools
 - a provider-independent LLM client interface, implemented for Claude (default `claude-sonnet-5-5`)
@@ -109,7 +109,8 @@ GET /checkout  ->  checkout-api  --HTTP-->  inventory-api  <-  GET /inventory
 | `inventory-api` | `GET /inventory?sku=...`, `GET /healthz` | `:8081` |
 
 `checkout-api` returns `502` if its call to `inventory-api` fails or times out.
-`inventory-api` responds after a fixed baseline delay (`BASE_LATENCY`, 20 ms by default).
+`inventory-api` responds after a fixed baseline delay (`BASE_LATENCY`, 20 ms by default), or with
+`500` when an error fault schedules the request to fail.
 
 Run them locally in two terminals:
 
@@ -165,12 +166,18 @@ traces, or Loki. See [ADR 0001](docs/adr/0001-fault-injection-admin-api.md) for 
 ```bash
 make fault-inventory-latency                        # inventory-api now responds in 800 ms
 make fault-inventory-latency FAULT_LATENCY_MS=1500  # custom latency (max 10000)
-make fault-clear                                    # back to the 20 ms baseline
-curl localhost:9081/fault                           # current state: {"latency_ms": 0} = no fault
+make fault-inventory-errors                         # 50% of inventory requests return 500
+make fault-inventory-errors FAULT_ERROR_PERCENT=20  # custom error percentage (1-100)
+make fault-clear                                    # back to the 20 ms baseline, no errors
+curl localhost:9081/fault                           # current state; all zeros = no fault
 ```
 
-The API is `GET`, `PUT {"latency_ms": n}`, and `DELETE` on `/fault`. Delays are fixed (no
-jitter), so the same setting always produces the same latency.
+The API is `GET`, `PUT {"latency_ms": n, "error_percent": p}` (either field or both), and
+`DELETE` on `/fault`. A `PUT` replaces the whole fault, so an omitted field is turned off.
+Faults are deterministic: delays are fixed (no jitter), and errors follow a counter-based
+schedule instead of a random one, so exactly `p` of every 100 consecutive requests fail, spread
+evenly. A failed request waits for the configured delay, then returns `500` and logs an ordinary
+`inventory request failed` error; checkout-api turns it into a `502`.
 
 ## Scenarios
 

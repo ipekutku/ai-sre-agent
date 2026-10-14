@@ -3,6 +3,7 @@ package checkout
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,7 +14,7 @@ import (
 )
 
 func TestInventoryClientAgainstRealHandler(t *testing.T) {
-	srv := httptest.NewServer(inventory.NewHandler(inventory.NewLatency(0)))
+	srv := httptest.NewServer(inventory.NewHandler(slog.New(slog.DiscardHandler), inventory.NewFaults(0)))
 	defer srv.Close()
 
 	// Trailing slash must not produce a "//inventory" path.
@@ -85,7 +86,7 @@ func TestInventoryClientTimeout(t *testing.T) {
 }
 
 func TestInventoryClientContextCancelled(t *testing.T) {
-	srv := httptest.NewServer(inventory.NewHandler(inventory.NewLatency(0)))
+	srv := httptest.NewServer(inventory.NewHandler(slog.New(slog.DiscardHandler), inventory.NewFaults(0)))
 	defer srv.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())

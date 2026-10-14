@@ -53,3 +53,10 @@ Delays are fixed (no jitter), so a given configuration always produces the same 
 - 2026-10-14: Service logs are now exported to Loki (ADR 0004). The fault-admin logger is a
   separate logger that writes to stdout only, so fault changes are still logged for auditing
   but never reach the log backend. A test in `cmd/inventory-api` checks this.
+- 2026-10-15: The API now supports HTTP errors, as anticipated above:
+  `PUT /fault {"latency_ms": n, "error_percent": p}`, with either field or both, replaces the
+  whole fault. Errors are deterministic like delays. A counter-based schedule, restarted on each
+  `PUT`, makes exactly `p` of every 100 consecutive requests fail, spread evenly, with no RNG. A
+  failed request waits for the configured delay, then returns `500` and logs a generic server
+  error. Neither the response nor the log mentions injection, and the tests that check the admin
+  API produces no spans and no exported logs now run with an error fault active.

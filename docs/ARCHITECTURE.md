@@ -37,7 +37,7 @@ direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
 | Component | Location | Responsibility |
 |---|---|---|
 | checkout-api | `cmd/checkout-api`, `internal/services/checkout` | `GET /checkout`; calls inventory-api |
-| inventory-api | `cmd/inventory-api`, `internal/services/inventory` | `GET /inventory` with a fixed baseline delay; fault admin API on a separate port |
+| inventory-api | `cmd/inventory-api`, `internal/services/inventory` | `GET /inventory` with a fixed baseline delay; fault admin API (latency, HTTP errors) on a separate port |
 | Metrics | `internal/httpmetrics` | server and client (dependency) latency histograms, `/metrics` |
 | Telemetry | `internal/telemetry` | OpenTelemetry setup (OTLP/HTTP export of spans and logs, each a no-op without an endpoint); server and client spans with W3C propagation; request IDs; access logs; the JSON logger with trace correlation |
 | Environment | `deploy/` | Docker Compose: both services, Prometheus (5 s scrape), Tempo, Loki, and Grafana (provisioned datasources only); ports on 127.0.0.1 |

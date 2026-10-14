@@ -1,8 +1,9 @@
-.PHONY: fmt fmt-check vet test ci up down fault-inventory-latency fault-clear eval eval-repeat
+.PHONY: fmt fmt-check vet test ci up down fault-inventory-latency fault-inventory-errors fault-clear eval eval-repeat
 
 COMPOSE := docker compose -f deploy/docker-compose.yml
 INVENTORY_ADMIN := http://127.0.0.1:9081
 FAULT_LATENCY_MS ?= 800
+FAULT_ERROR_PERCENT ?= 50
 # Where the scenario runner sends the agent's spans: Tempo's OTLP receiver, published on
 # 127.0.0.1. Set it to empty to run investigations untraced.
 AGENT_TRACES_ENDPOINT ?= http://127.0.0.1:4318/v1/traces
@@ -40,12 +41,19 @@ up:
 down:
 	$(COMPOSE) down
 
-## fault-inventory-latency: make inventory-api respond in FAULT_LATENCY_MS (default 800)
+## fault-inventory-latency: make inventory-api respond in FAULT_LATENCY_MS (default 800).
+##                          Replaces any active fault.
 fault-inventory-latency:
 	@curl -fsS -X PUT -H 'Content-Type: application/json' \
 		-d '{"latency_ms": $(FAULT_LATENCY_MS)}' $(INVENTORY_ADMIN)/fault
 
-## fault-clear: restore inventory-api's baseline latency
+## fault-inventory-errors: make FAULT_ERROR_PERCENT (default 50) of inventory-api requests
+##                         fail with 500. Replaces any active fault.
+fault-inventory-errors:
+	@curl -fsS -X PUT -H 'Content-Type: application/json' \
+		-d '{"error_percent": $(FAULT_ERROR_PERCENT)}' $(INVENTORY_ADMIN)/fault
+
+## fault-clear: restore inventory-api's normal behaviour (baseline latency, no errors)
 fault-clear:
 	@curl -fsS -X DELETE $(INVENTORY_ADMIN)/fault
 

@@ -107,10 +107,10 @@ func run(ctx context.Context, logger, adminLogger *slog.Logger, cfg config, tp t
 // admin API is neither instrumented nor traced, so fault state never appears
 // in metrics or traces (ADR 0001).
 func handlers(logger, adminLogger *slog.Logger, cfg config, tp trace.TracerProvider) (service, admin http.Handler) {
-	latency := inventory.NewLatency(cfg.baseLatency)
+	faults := inventory.NewFaults(cfg.baseLatency)
 	service = telemetry.Handler(tp, logger,
-		httpmetrics.Handler(httpmetrics.NewRegistry(), inventory.NewHandler(latency)), "/metrics")
-	admin = inventory.NewAdminHandler(adminLogger, latency)
+		httpmetrics.Handler(httpmetrics.NewRegistry(), inventory.NewHandler(logger, faults)), "/metrics")
+	admin = inventory.NewAdminHandler(adminLogger, faults)
 	return service, admin
 }
 
