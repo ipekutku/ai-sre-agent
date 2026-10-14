@@ -141,6 +141,47 @@ func (e Environment) WaitForTrigger(ctx context.Context, t Trigger) (float64, er
 	return fired, nil
 }
 
+// WaitForTraces blocks until Tempo returns a trace from service that started
+// at or after since. Span ingestion lags by several seconds, so without this
+// an investigation can start before traces of the incident are searchable.
+// It checks only that the backend has caught up, not what the traces contain.
+func (e Environment) WaitForTraces(ctx context.Context, service string, since time.Time) error {
+	params := url.Values{
+		"q":     {"{ resource.service.name = " + strconv.Quote(service) + " }"},
+		"start": {strconv.FormatInt(since.Unix(), 10)},
+		"limit": {"20"},
+	}
+	return poll(ctx, func() error {
+		params.Set("end", strconv.FormatInt(time.Now().Unix()+1, 10))
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.TempoURL+"/api/search?"+params.Encode(), nil)
+		if err != nil {
+			return err
+		}
+		resp, err := e.HTTP.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("tempo search: HTTP %d", resp.StatusCode)
+		}
+		var sr struct {
+			Traces []struct {
+				StartTimeUnixNano string `json:"startTimeUnixNano"`
+			} `json:"traces"`
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&sr); err != nil {
+			return fmt.Errorf("decode tempo response: %w", err)
+		}
+		for _, t := range sr.Traces {
+			if ns, err := strconv.ParseInt(t.StartTimeUnixNano, 10, 64); err == nil && ns >= since.UnixNano() {
+				return nil
+			}
+		}
+		return fmt.Errorf("no %s trace since %s is searchable yet", service, since.Format(time.RFC3339))
+	})
+}
+
 // QueryValue runs an instant PromQL query and returns the first value.
 func (e Environment) QueryValue(ctx context.Context, query string) (float64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.PrometheusURL+"/api/v1/query",
@@ -202,16 +243,21 @@ func (e Environment) do(ctx context.Context, method, target, body string) error 
 }
 
 // poll calls f every pollInterval until it succeeds or ctx is done, returning
-// f's last error on timeout.
+// f's last error on timeout. An error caused by ctx ending mid-call does not
+// replace the previous, more informative one.
 func poll(ctx context.Context, f func() error) error {
+	var last error
 	for {
 		err := f()
 		if err == nil {
 			return nil
 		}
+		if last == nil || ctx.Err() == nil {
+			last = err
+		}
 		select {
 		case <-ctx.Done():
-			return err
+			return last
 		case <-time.After(pollInterval):
 		}
 	}

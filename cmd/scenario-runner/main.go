@@ -2,7 +2,7 @@
 // local environment (make up) and evaluates the agent's diagnosis:
 //
 //	wait for environment -> generate traffic -> baseline -> inject fault ->
-//	wait for alert condition -> investigate -> evaluate -> clean up
+//	wait for alert condition -> wait for traces -> investigate -> evaluate -> clean up
 //
 // The runner reads both scenario.yaml and ground-truth.yaml. The agent only
 // receives the scenario's incident.
@@ -173,7 +173,8 @@ func run(ctx context.Context, logger *slog.Logger, out io.Writer, o options) (bo
 		return false, err
 	}
 
-	// 4. Fault, then wait until the alert condition is observable.
+	// 4. Fault, then wait until the alert condition is observable and the
+	// trace backend has caught up.
 	logger.Info("injecting fault", "service", sc.Fault.Service, "type", sc.Fault.Type)
 	if err := env.ApplyFault(ctx, sc.Fault); err != nil {
 		return false, fmt.Errorf("inject fault: %w", err)
@@ -182,7 +183,18 @@ func run(ctx context.Context, logger *slog.Logger, out io.Writer, o options) (bo
 	if err != nil {
 		return false, err
 	}
-	logger.Info("alert condition met; raising incident", "value", value, "incident_id", sc.Incident.IncidentID)
+	triggered := time.Now()
+	logger.Info("alert condition met; waiting for traces to be searchable", "value", value)
+
+	// The agent should be able to see traces of the incident it is given.
+	tracesCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	err = env.WaitForTraces(tracesCtx, sc.Incident.Service, triggered)
+	cancel()
+	if err != nil {
+		return false, fmt.Errorf("traces not searchable in tempo: %w", err)
+	}
+	logger.Info("raising incident", "incident_id", sc.Incident.IncidentID,
+		"trace_wait", time.Since(triggered).Round(100*time.Millisecond))
 
 	// 5. Investigate. The agent receives only the incident.
 	result, invErr := investigator.Investigate(ctx, sc.Incident)

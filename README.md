@@ -43,10 +43,12 @@ make eval
 `make eval` starts the environment (`make up`) and runs
 [`cmd/scenario-runner`](cmd/scenario-runner), which:
 
-1. waits until the services and Prometheus are ready, and clears any leftover fault
+1. waits until the services, Prometheus, and Tempo are ready, and clears any leftover fault
 2. sends steady `GET /checkout` traffic (20 rps) and records a 60 s baseline
 3. injects the scenario's fault (inventory-api responds in 800 ms)
-4. waits until the alert condition holds in Prometheus (checkout-api p95 > 500 ms)
+4. waits until the alert condition holds in Prometheus (checkout-api p95 > 500 ms), then until
+   Tempo can return a trace of the alerted service that started after that point, so the agent
+   never investigates before traces are searchable
 5. gives the agent the incident only; the agent investigates through its tools
 6. compares the diagnosis with `ground-truth.yaml`, prints the report, and clears the fault
 
@@ -78,8 +80,12 @@ e.g. `make eval EVAL_ARGS="-effort high -baseline 30s"` (see `go run ./cmd/scena
 Without credentials the runner stops immediately. `make down` stops the environment.
 
 The model's choices vary from run to run, so a single PASS says little. `make eval-repeat RUNS=5`
-runs the scenario five times back to back (about 2 minutes each) and prints how many passed. It
-exits non-zero if any run failed, and stops at the first setup error.
+runs the scenario five times and prints how many passed. It exits non-zero if any run failed, and
+stops at the first setup error. Runs share Prometheus and Tempo, so an investigation's range
+queries can also see earlier runs' faults. A cooldown between runs (`COOLDOWN`, default 300 s)
+gives each fault its own spike, separated by normal traffic. Each run takes about 2 minutes, so
+with the cooldown five runs take about 30 minutes. `COOLDOWN=0` skips it, for example when the
+timeline doesn't matter.
 
 ## Demo services
 

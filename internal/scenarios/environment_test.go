@@ -2,9 +2,12 @@ package scenarios
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +25,10 @@ type fakeEnv struct {
 	faults    []string // "PUT <body>" / "DELETE"
 	checkouts atomic.Int64
 	tempoUp   atomic.Bool
+	// traceStart is the start time (unix ns) of the one trace Tempo search
+	// returns; 0 means no traces.
+	traceStart atomic.Int64
+	search     url.Values
 }
 
 func (f *fakeEnv) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -30,6 +37,15 @@ func (f *fakeEnv) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	case r.URL.Path == "/checkout":
 		f.checkouts.Add(1)
+	case r.URL.Path == "/api/search":
+		f.mu.Lock()
+		f.search = r.URL.Query()
+		f.mu.Unlock()
+		if ns := f.traceStart.Load(); ns != 0 {
+			fmt.Fprintf(w, `{"traces":[{"traceID":"abc","startTimeUnixNano":"%d"}]}`, ns)
+			return
+		}
+		_, _ = w.Write([]byte(`{"traces":[]}`))
 	case r.URL.Path == "/ready":
 		if !f.tempoUp.Load() {
 			http.Error(w, "Ingester not ready", http.StatusServiceUnavailable)
@@ -126,6 +142,39 @@ func TestWaitForTrigger(t *testing.T) {
 	trigger.TimeoutSeconds = 1
 	if _, err := env.WaitForTrigger(context.Background(), trigger); err == nil || !strings.Contains(err.Error(), "not met within 1s") {
 		t.Errorf("err = %v, want timeout", err)
+	}
+}
+
+func TestWaitForTraces(t *testing.T) {
+	f := &fakeEnv{}
+	env := newEnv(t, f)
+	since := time.Now()
+
+	// No traces, then only a trace from before since: not caught up.
+	for _, start := range []int64{0, since.Add(-time.Second).UnixNano()} {
+		f.traceStart.Store(start)
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		err := env.WaitForTraces(ctx, "checkout-api", since)
+		cancel()
+		if err == nil || !strings.Contains(err.Error(), "no checkout-api trace") {
+			t.Errorf("trace start %d: err = %v, want not searchable yet", start, err)
+		}
+	}
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		f.traceStart.Store(since.Add(time.Second).UnixNano())
+	}()
+	if err := env.WaitForTraces(context.Background(), "checkout-api", since); err != nil {
+		t.Fatalf("WaitForTraces: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if q := f.search.Get("q"); q != `{ resource.service.name = "checkout-api" }` {
+		t.Errorf("q = %s", q)
+	}
+	if f.search.Get("start") != strconv.FormatInt(since.Unix(), 10) {
+		t.Errorf("start = %s, want %d", f.search.Get("start"), since.Unix())
 	}
 }
 
