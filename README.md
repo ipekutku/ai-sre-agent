@@ -28,7 +28,9 @@ Done:
   diagnosis chosen from a fixed list of root-cause codes ([ADR 0002](docs/adr/0002-closed-root-cause-taxonomy.md))
 - `make eval`: the scenario end to end, from fault injection to PASS/FAIL
 
-`make eval` passes against the real API: the agent identifies `INVENTORY_DOWNSTREAM_LATENCY` from metrics alone.
+As of 2026-10-14 (`claude-sonnet-5-5`), `make eval-repeat` has passed 8 of 8 runs against the real
+API. The agent identifies `INVENTORY_DOWNSTREAM_LATENCY` by combining metrics with traces: it used
+`query_traces` in 7 of the 8 runs, at about $0.02–$0.035 per run.
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan.
 
 ## Running the demo
