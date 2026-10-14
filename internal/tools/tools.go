@@ -3,8 +3,8 @@
 //
 // Every tool call goes through Registry.Call, which validates the tool name,
 // enforces a per-call timeout and an output-size limit, measures latency,
-// logs the call, and converts failures into structured errors that can be
-// returned to the model.
+// logs and traces the call, and converts failures into structured errors that
+// can be returned to the model.
 //
 // Tools must be read-only and must never expose fault-injection state or
 // scenario ground truth.
@@ -19,6 +19,11 @@ import (
 	"log/slog"
 	"sort"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 // Tool is a capability the investigation agent can invoke.
@@ -87,6 +92,7 @@ type Registry struct {
 	callTimeout    time.Duration
 	maxOutputBytes int
 	logger         *slog.Logger
+	tracer         trace.Tracer
 }
 
 // Options configures a Registry.
@@ -95,6 +101,8 @@ type Options struct {
 	CallTimeout time.Duration
 	// MaxOutputBytes bounds the JSON size of a tool's output. Default 32 KiB.
 	MaxOutputBytes int
+	// TracerProvider records a span per tool call. Default: no tracing.
+	TracerProvider trace.TracerProvider
 }
 
 // NewRegistry returns a registry of the given tools. Tool names must be unique.
@@ -105,11 +113,15 @@ func NewRegistry(logger *slog.Logger, opts Options, tools ...Tool) (*Registry, e
 	if opts.MaxOutputBytes <= 0 {
 		opts.MaxOutputBytes = 32 << 10
 	}
+	if opts.TracerProvider == nil {
+		opts.TracerProvider = noop.NewTracerProvider()
+	}
 	r := &Registry{
 		tools:          make(map[string]Tool, len(tools)),
 		callTimeout:    opts.CallTimeout,
 		maxOutputBytes: opts.MaxOutputBytes,
 		logger:         logger,
+		tracer:         opts.TracerProvider.Tracer(tracerScope),
 	}
 	for _, t := range tools {
 		if _, dup := r.tools[t.Name()]; dup {
@@ -130,9 +142,33 @@ func (r *Registry) Definitions() []Definition {
 	return defs
 }
 
+// tracerScope is the instrumentation scope of tool-call spans.
+const tracerScope = "github.com/ipekutku/ai-sre-agent/internal/tools"
+
+// unknownToolSpan names the span of a call to an unregistered tool. The
+// requested name is model output, so it is kept out of span names and
+// attributes.
+const unknownToolSpan = "tool.unknown"
+
 // Call runs the named tool. It never returns a Go error: every failure is
 // reported in Result.Err so it can be passed back to the model.
+//
+// Each call is recorded as a span named "tool.<name>" carrying only the tool
+// name, input and output sizes, and the error code; never the input or output
+// themselves.
 func (r *Registry) Call(ctx context.Context, name string, input json.RawMessage) Result {
+	spanName := unknownToolSpan
+	spanAttrs := []attribute.KeyValue{
+		attribute.String("gen_ai.operation.name", "execute_tool"),
+		attribute.Int("tool.input_bytes", len(input)),
+	}
+	if _, ok := r.tools[name]; ok {
+		spanName = "tool." + name
+		spanAttrs = append(spanAttrs, attribute.String("gen_ai.tool.name", name))
+	}
+	ctx, span := r.tracer.Start(ctx, spanName, trace.WithAttributes(spanAttrs...))
+	defer span.End()
+
 	start := time.Now()
 	res := r.call(ctx, name, input)
 	res.Tool = name
@@ -140,8 +176,11 @@ func (r *Registry) Call(ctx context.Context, name string, input json.RawMessage)
 
 	attrs := []any{"tool", name, "duration_ms", res.Duration.Milliseconds(), "input", truncate(string(input), maxLoggedInputBytes)}
 	if res.Err != nil {
+		span.SetAttributes(attribute.String("tool.error_code", string(res.Err.Code)))
+		span.SetStatus(codes.Error, string(res.Err.Code))
 		r.logger.WarnContext(ctx, "tool call failed", append(attrs, "error_code", res.Err.Code, "error", res.Err.Message)...)
 	} else {
+		span.SetAttributes(attribute.Int("tool.output_bytes", len(res.Output)))
 		r.logger.InfoContext(ctx, "tool call succeeded", append(attrs, "output_bytes", len(res.Output))...)
 	}
 	return res

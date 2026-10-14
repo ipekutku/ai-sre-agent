@@ -16,7 +16,8 @@ the agent never sees.
 **Milestone 2: Multi-Signal Investigation** (in progress). Done so far: OpenTelemetry tracing of
 both services, stored in Grafana Tempo (see [Traces](#traces)), and structured, trace-correlated
 logs, stored in Grafana Loki (see [Logs](#logs)). The agent can query traces with `query_traces`
-and logs with `query_logs`.
+and logs with `query_logs`, and each investigation is itself traced (see
+[Agent traces](#agent-traces)).
 
 Done:
 
@@ -56,6 +57,9 @@ make eval
 5. gives the agent the incident only; the agent investigates through its tools
 6. compares the diagnosis with `ground-truth.yaml`, prints the report, and clears the fault
 
+The investigation is recorded as a trace in Tempo, and the report prints its ID
+(see [Agent traces](#agent-traces)).
+
 Example output shape:
 
 ```text
@@ -77,6 +81,8 @@ Investigation:
   tool calls:      ... (0 failed): inspect_service=..., query_logs=..., query_metrics=..., query_traces=...
   tokens:          ...
   estimated cost:  $...
+  traffic:         ... ok, 0 failed
+  trace id:        4bf92f3577b34da6a3ce929d0e0e4736
 ```
 
 The exit code is 0 on PASS, 1 on FAIL, 2 on a setup error. Runner options go in `EVAL_ARGS`,
@@ -132,7 +138,7 @@ Configuration is via environment variables:
 Requires Docker with the Compose plugin.
 
 ```bash
-make up     # build and start checkout-api, inventory-api, Prometheus, Tempo, and Loki
+make up     # build and start checkout-api, inventory-api, Prometheus, Tempo, Loki, and Grafana
 make down   # stop and remove the containers
 ```
 
@@ -142,7 +148,9 @@ make down   # stop and remove the containers
 | inventory-api | http://localhost:8081/inventory |
 | Prometheus | http://localhost:9090 |
 | Tempo (trace query API) | http://localhost:3200 |
+| Tempo (OTLP/HTTP receiver, for the agent's spans) | http://localhost:4318 |
 | Loki (log query API) | http://localhost:3100 |
+| Grafana (traces, logs, and metrics; anonymous) | http://localhost:3000 |
 | inventory-api fault admin | http://localhost:9081/fault |
 
 Ports are bound to `127.0.0.1` only. Prometheus scrapes every 5s
@@ -194,9 +202,9 @@ call with its latency, and returns failures as structured errors (`unknown_tool`
 `timeout`, `output_too_large`, `execution_failed`) the model can react to. The runner reports how
 many times each tool was called.
 
-`query_traces` and `query_logs` do not accept raw TraceQL or LogQL. Tempo will also store the
-agent's own spans, so `query_traces` returns only spans from services in the catalog and hides
-trace roots from any other service. `query_logs` likewise returns only entries from catalog
+`query_traces` and `query_logs` do not accept raw TraceQL or LogQL. Tempo also stores the
+agent's own spans ([Agent traces](#agent-traces)), so `query_traces` returns only spans from
+services in the catalog and hides trace roots from any other service. `query_logs` likewise returns only entries from catalog
 services, and drops fault-admin entries even though they are never exported
 ([ADR 0005](docs/adr/0005-structured-trace-and-log-queries.md)).
 
@@ -288,6 +296,41 @@ curl -G localhost:3100/loki/api/v1/query_range \
 
 Entries are usually searchable in Loki within a few seconds. The agent reads logs through the
 [`query_logs`](#investigation-tools) tool.
+
+## Agent traces
+
+`make eval` and `make eval-repeat` trace each investigation with OpenTelemetry under the service
+name `ai-sre-agent`. The scenario runner, which runs on the host, exports spans to Tempo's OTLP
+receiver at `127.0.0.1:4318` (`AGENT_TRACES_ENDPOINT`; set it to empty to turn tracing off):
+
+```text
+investigation                 incident, budgets, outcome, root-cause code, totals
+├── llm.request               model, finish reason, tokens, cost
+├── tool.query_metrics        tool, input/output size, error code
+├── llm.request
+├── tool.query_traces
+├── tool.query_logs
+└── llm.final_diagnosis       the request whose diagnosis was accepted
+```
+
+LLM spans use the OpenTelemetry GenAI attribute names (`gen_ai.usage.input_tokens`, ...) and last
+only as long as the model request; the tool calls a response asks for are siblings, not
+children. A rejected diagnosis is a `diagnosis.rejected` event on the investigation span. Spans
+never carry prompts, model output, tool input or output, or the diagnosis text, only IDs,
+counts, sizes, codes, and the accepted root-cause code. Only the investigation is traced: the
+runner's traffic, fault injection, and waits create no spans, so nothing about the fault reaches
+Tempo.
+
+To view an investigation, open Grafana at http://localhost:3000, go to **Explore**, choose the
+**Tempo** datasource, and paste the trace ID from the report. Or fetch it directly:
+
+```bash
+curl localhost:3200/api/v2/traces/<trace-id>
+```
+
+Grafana is for people: it has provisioned Tempo, Loki, and Prometheus datasources and no
+dashboards. The agent has no tool that reaches it, and `query_traces` never returns
+`ai-sre-agent` spans.
 
 ## Requirements
 

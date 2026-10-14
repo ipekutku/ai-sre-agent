@@ -10,6 +10,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -110,6 +115,71 @@ func TestRegistryParentCancellation(t *testing.T) {
 	res := r.Call(ctx, "wait", nil)
 	if res.Err == nil || res.Err.Code != ErrExecutionFailed {
 		t.Errorf("err = %+v, want execution_failed for a cancelled investigation", res.Err)
+	}
+}
+
+func TestRegistryTracesCalls(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	echo := fakeTool{name: "echo", call: func(_ context.Context, in json.RawMessage) (any, error) {
+		return map[string]string{"got": string(in)}, nil
+	}}
+	broken := fakeTool{name: "broken", call: func(context.Context, json.RawMessage) (any, error) {
+		return nil, errors.New("backend says secret-query failed")
+	}}
+	r := newRegistry(t, Options{TracerProvider: tp}, echo, broken)
+
+	ctx, parent := tp.Tracer("test").Start(context.Background(), "investigation")
+	r.Call(ctx, "echo", json.RawMessage(`{"query":"up"}`))
+	r.Call(ctx, "broken", json.RawMessage(`{}`))
+	r.Call(ctx, "execute_shell", json.RawMessage(`{"cmd":"cat ground-truth.yaml"}`))
+	parent.End()
+
+	spans := rec.Ended()
+	if len(spans) != 4 {
+		t.Fatalf("got %d spans, want 3 tool spans and the parent", len(spans))
+	}
+	tests := []struct {
+		name, tool, errorCode string
+	}{
+		{"tool.echo", "echo", ""},
+		{"tool.broken", "broken", "execution_failed"},
+		// The requested name is model output and stays out of the span.
+		{"tool.unknown", "", "unknown_tool"},
+	}
+	for i, tt := range tests {
+		s := spans[i]
+		attrs := map[attribute.Key]attribute.Value{}
+		for _, kv := range s.Attributes() {
+			attrs[kv.Key] = kv.Value
+		}
+		if s.Name() != tt.name || s.Parent().SpanID() != parent.SpanContext().SpanID() {
+			t.Errorf("span %d = %s (parent %s), want %s under the caller's span", i, s.Name(), s.Parent().SpanID(), tt.name)
+		}
+		if attrs["gen_ai.tool.name"].AsString() != tt.tool || attrs["tool.error_code"].AsString() != tt.errorCode {
+			t.Errorf("%s attributes = %v", tt.name, attrs)
+		}
+		if failed := s.Status().Code == codes.Error; failed != (tt.errorCode != "") {
+			t.Errorf("%s status = %+v", tt.name, s.Status())
+		}
+		if attrs["tool.input_bytes"].AsInt64() == 0 {
+			t.Errorf("%s has no input size", tt.name)
+		}
+	}
+	if got := spans[0].Attributes(); !strings.Contains(fmt.Sprint(got), "tool.output_bytes") {
+		t.Errorf("successful call has no output size: %v", got)
+	}
+
+	// Sizes and codes only: no tool input, output, error messages, or
+	// unknown tool names.
+	var dump strings.Builder
+	for _, s := range spans {
+		fmt.Fprintln(&dump, s.Name(), s.Status().Description, s.Attributes(), s.Events())
+	}
+	for _, leaked := range []string{"query", "secret-query", "execute_shell", "ground-truth"} {
+		if strings.Contains(dump.String(), leaked) {
+			t.Errorf("spans contain %q:\n%s", leaked, dump.String())
+		}
 	}
 }
 

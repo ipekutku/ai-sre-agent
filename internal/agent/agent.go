@@ -14,6 +14,9 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+
 	"github.com/ipekutku/ai-sre-agent/internal/diagnosis"
 	"github.com/ipekutku/ai-sre-agent/internal/incident"
 	"github.com/ipekutku/ai-sre-agent/internal/llm"
@@ -31,7 +34,7 @@ var (
 	ErrModelStopped = errors.New("model stopped without a diagnosis")
 )
 
-// Config bounds an investigation.
+// Config bounds an investigation and configures its tracing.
 type Config struct {
 	// MaxLLMRequests bounds model calls. Default 20.
 	MaxLLMRequests int
@@ -40,6 +43,10 @@ type Config struct {
 	MaxToolCalls int
 	// MaxDuration bounds the whole investigation. Default 5m.
 	MaxDuration time.Duration
+	// TracerProvider records each investigation as a trace. Tool-call spans
+	// come from the tools.Registry, which needs the same provider. Default: no
+	// tracing.
+	TracerProvider trace.TracerProvider
 }
 
 // Agent investigates incidents.
@@ -48,6 +55,7 @@ type Agent struct {
 	tools  *tools.Registry
 	cfg    Config
 	logger *slog.Logger
+	tracer trace.Tracer
 }
 
 // New returns an Agent.
@@ -61,7 +69,10 @@ func New(client llm.Client, registry *tools.Registry, logger *slog.Logger, cfg C
 	if cfg.MaxDuration <= 0 {
 		cfg.MaxDuration = 5 * time.Minute
 	}
-	return &Agent{llm: client, tools: registry, cfg: cfg, logger: logger}
+	if cfg.TracerProvider == nil {
+		cfg.TracerProvider = noop.NewTracerProvider()
+	}
+	return &Agent{llm: client, tools: registry, cfg: cfg, logger: logger, tracer: cfg.TracerProvider.Tracer(tracerScope)}
 }
 
 // Stats describes how an investigation ran. It is populated even when the
@@ -77,6 +88,9 @@ type Stats struct {
 	Usage           llm.Usage
 	// Models lists the models that served requests, in order of first use.
 	Models []string
+	// TraceID identifies the investigation's trace. It is empty if tracing
+	// is disabled.
+	TraceID string
 }
 
 // Result is the outcome of an investigation.
@@ -92,13 +106,18 @@ func (a *Agent) Investigate(ctx context.Context, inc incident.Incident) (res Res
 	}
 
 	start := time.Now()
+	ctx, span := a.startInvestigation(ctx, inc)
+	defer span.End()
+	res.Stats.TraceID = traceID(span)
 	ctx, cancel := context.WithTimeout(ctx, a.cfg.MaxDuration)
 	defer cancel()
 	log := a.logger.With("incident_id", inc.IncidentID)
 
 	defer func() {
 		res.Stats.Duration = time.Since(start)
+		endInvestigation(span, res, err)
 		attrs := []any{
+			"trace_id", res.Stats.TraceID,
 			"duration_ms", res.Stats.Duration.Milliseconds(),
 			"llm_requests", res.Stats.LLMRequests,
 			"tool_calls", res.Stats.ToolCalls,
@@ -126,14 +145,17 @@ func (a *Agent) Investigate(ctx context.Context, inc incident.Incident) (res Res
 			return res, ErrBudgetExhausted
 		}
 
-		resp, err := a.llm.Generate(ctx, req)
+		llmCtx, call := a.startLLMRequest(ctx, res.Stats.LLMRequests+1)
+		resp, err := a.llm.Generate(llmCtx, req)
 		res.Stats.LLMRequests++
 		if err != nil {
+			call.failed(err)
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				return res, fmt.Errorf("%w after %s: %w", ErrTimeout, a.cfg.MaxDuration, err)
 			}
 			return res, fmt.Errorf("llm request %d: %w", res.Stats.LLMRequests, err)
 		}
+		call.responded(resp)
 		res.Stats.Usage = res.Stats.Usage.Add(resp.Usage)
 		res.Stats.Models = appendUnique(res.Stats.Models, resp.Model)
 		log.Info("llm request",
@@ -147,13 +169,16 @@ func (a *Agent) Investigate(ctx context.Context, inc incident.Incident) (res Res
 		switch resp.StopReason {
 		case llm.StopToolUse:
 		case llm.StopEndTurn:
+			call.end(false)
 			req.Messages = append(req.Messages, llm.UserText(nudgeSubmit))
 			continue
 		default:
+			call.end(false)
 			return res, fmt.Errorf("%w: stop reason %q", ErrModelStopped, resp.StopReason)
 		}
 
 		results, d, done := a.handleToolUses(ctx, log, inc, resp.ToolUses(), &res.Stats)
+		call.end(done)
 		if done {
 			res.Diagnosis = d
 			return res, nil
@@ -172,6 +197,7 @@ func (a *Agent) handleToolUses(ctx context.Context, log *slog.Logger, inc incide
 				return nil, d, true
 			}
 			log.Warn("invalid diagnosis submitted", "error", err)
+			trace.SpanFromContext(ctx).AddEvent(rejectedEvent)
 			results = append(results, errorResult(use.ToolUseID, "invalid_input",
 				"diagnosis rejected: "+err.Error()+". Fix it and call "+submitToolName+" again."))
 			continue

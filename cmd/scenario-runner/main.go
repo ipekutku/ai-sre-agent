@@ -7,6 +7,13 @@
 // The runner reads both scenario.yaml and ground-truth.yaml. The agent only
 // receives the scenario's incident.
 //
+// The investigation is traced (service name "ai-sre-agent") when an OTLP
+// traces endpoint is configured through the standard OTEL_EXPORTER_OTLP_*
+// environment variables; make eval points it at Tempo. Only the investigation
+// is traced: the runner's own steps (traffic, fault injection, waits) use an
+// uninstrumented HTTP client and create no spans, so fault details never reach
+// the trace backend.
+//
 // Requires Anthropic API credentials (ANTHROPIC_API_KEY) for the investigation.
 package main
 
@@ -30,8 +37,13 @@ import (
 	"github.com/ipekutku/ai-sre-agent/internal/evaluation"
 	"github.com/ipekutku/ai-sre-agent/internal/llm/anthropic"
 	"github.com/ipekutku/ai-sre-agent/internal/scenarios"
+	"github.com/ipekutku/ai-sre-agent/internal/telemetry"
 	"github.com/ipekutku/ai-sre-agent/internal/tools"
 )
+
+// agentServiceName is the service name of the agent's spans. It is not in the
+// tools' service catalog, so the agent can never read its own spans.
+const agentServiceName = "ai-sre-agent"
 
 type options struct {
 	scenarioDir    string
@@ -107,6 +119,20 @@ func run(ctx context.Context, logger *slog.Logger, out io.Writer, o options) (bo
 		return false, fmt.Errorf("anthropic API check failed (is ANTHROPIC_API_KEY set?): %w", err)
 	}
 
+	// The runner's logger writes to stderr only, so a failing trace backend
+	// cannot feed its own errors back into the export queue.
+	providers, shutdownTelemetry, err := telemetry.Setup(ctx, logger, agentServiceName, os.Getenv)
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		if err := telemetry.Shutdown(shutdownTelemetry); err != nil {
+			logger.Warn("flushing agent spans failed", "error", err)
+		}
+	}()
+
+	// Neither the runner nor the tools trace their HTTP requests, so no
+	// trace context is sent to the services or backends.
 	hc := &http.Client{Timeout: 10 * time.Second}
 	env := scenarios.Environment{
 		CheckoutURL: o.checkoutURL, InventoryURL: o.inventoryURL,
@@ -139,12 +165,13 @@ func run(ctx context.Context, logger *slog.Logger, out io.Writer, o options) (bo
 	if err != nil {
 		return false, err
 	}
-	registry, err := tools.NewRegistry(logger, tools.Options{}, qm, qt, ql, is)
+	registry, err := tools.NewRegistry(logger, tools.Options{TracerProvider: providers.Tracer}, qm, qt, ql, is)
 	if err != nil {
 		return false, err
 	}
 	investigator := agent.New(llmClient, registry, logger, agent.Config{
 		MaxLLMRequests: o.maxLLMRequests, MaxToolCalls: o.maxToolCalls, MaxDuration: o.maxDuration,
+		TracerProvider: providers.Tracer,
 	})
 
 	// 1. Environment ready, no leftover fault.
@@ -247,6 +274,9 @@ func writeDetails(w io.Writer, r agent.Result, t scenarios.TrafficStats) {
 		s.Usage.InputTokens, s.Usage.OutputTokens, s.Usage.CacheReadTokens, s.Usage.CacheWriteTokens)
 	fmt.Fprintf(w, "  estimated cost:  %s\n", cost)
 	fmt.Fprintf(w, "  traffic:         %d ok, %d failed\n", t.OK, t.Failed)
+	if s.TraceID != "" {
+		fmt.Fprintf(w, "  trace id:        %s\n", s.TraceID)
+	}
 
 	d := r.Diagnosis
 	if d.RootCause.Code == "" {

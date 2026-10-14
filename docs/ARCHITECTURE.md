@@ -28,6 +28,8 @@ direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
 
   checkout-api, inventory-api --OTLP/HTTP spans--> Tempo :3200
   checkout-api, inventory-api --OTLP/HTTP logs---> Loki  :3100
+  agent (investigation only) ---OTLP/HTTP spans--> Tempo :4318 (service "ai-sre-agent")
+  Grafana :3000 (people only) ---reads--> Tempo, Loki, Prometheus
 ```
 
 ## Components
@@ -38,14 +40,14 @@ direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
 | inventory-api | `cmd/inventory-api`, `internal/services/inventory` | `GET /inventory` with a fixed baseline delay; fault admin API on a separate port |
 | Metrics | `internal/httpmetrics` | server and client (dependency) latency histograms, `/metrics` |
 | Telemetry | `internal/telemetry` | OpenTelemetry setup (OTLP/HTTP export of spans and logs, each a no-op without an endpoint); server and client spans with W3C propagation; request IDs; access logs; the JSON logger with trace correlation |
-| Environment | `deploy/` | Docker Compose: both services, Prometheus (5 s scrape), Tempo, and Loki; ports on 127.0.0.1 |
+| Environment | `deploy/` | Docker Compose: both services, Prometheus (5 s scrape), Tempo, Loki, and Grafana (provisioned datasources only); ports on 127.0.0.1 |
 | Scenarios | `scenarios/<id>/`, `internal/scenarios` | incident, fault, alert trigger; environment control for the runner |
-| Tools | `internal/tools` | `query_metrics`, `query_traces`, `query_logs`, `inspect_service`, and the registry (validation, timeouts, size limits, logging) |
+| Tools | `internal/tools` | `query_metrics`, `query_traces`, `query_logs`, `inspect_service`, and the registry (validation, timeouts, size limits, logging, a span per call) |
 | LLM boundary | `internal/llm`, `internal/llm/anthropic` | provider-independent `Client`; Claude implementation |
-| Agent | `internal/agent` | investigation loop, budgets, `submit_diagnosis` validation, stats |
+| Agent | `internal/agent` | investigation loop, budgets, `submit_diagnosis` validation, stats, investigation and LLM spans |
 | Diagnosis | `internal/diagnosis` | diagnosis schema and the closed root-cause code list |
 | Evaluation | `internal/evaluation` | loads ground truth; compares diagnosis; report |
-| Runner | `cmd/scenario-runner` | orchestrates one scenario end to end (`make eval`) |
+| Runner | `cmd/scenario-runner` | orchestrates one scenario end to end (`make eval`); sets up the agent's tracer |
 
 ## Investigation flow
 
@@ -73,8 +75,13 @@ The agent must infer the cause from observations only.
   agent's service catalog ([ADR 0001](adr/0001-fault-injection-admin-api.md)). Its logger writes
   to stdout only, so fault changes never reach Loki ([ADR 0004](adr/0004-log-backend-and-export.md)).
 - `query_traces` builds TraceQL from validated, structured input and returns only spans from
-  catalog services, so spans from any other source (such as the agent itself, once traced) never
-  reach the model ([ADR 0005](adr/0005-structured-trace-and-log-queries.md)).
+  catalog services, so spans from any other source, including the agent's own (`ai-sre-agent`),
+  never reach the model ([ADR 0005](adr/0005-structured-trace-and-log-queries.md)).
+- Only the investigation is traced. The runner's traffic, fault injection, and waits use an
+  uninstrumented HTTP client and create no spans, and neither the runner nor the tools propagate
+  trace context to the services. Agent spans carry no prompts, model output, tool payloads, or
+  diagnosis text, and nothing from the evaluation (expected code, PASS/FAIL).
+- Grafana is for people. No tool can reach it.
 - `query_logs` builds LogQL the same way, returns only entries from catalog services, and drops
   any entry marked `component=fault-admin`, both in the query and on the response, as a second
   line of defence behind the stdout-only admin logger.
@@ -87,7 +94,7 @@ refers to the scenario's incident, and its code matches the ground truth exactly
 from a fixed list ([ADR 0002](adr/0002-closed-root-cause-taxonomy.md)).
 
 The runner also reports investigation duration, LLM requests, tool calls (total, failed, and
-per tool), token usage, and estimated cost.
+per tool), token usage, estimated cost, and the investigation's trace ID.
 
 ## Security boundaries
 
@@ -98,6 +105,11 @@ per tool), token usage, and estimated cost.
 - The API key is read by the SDK from the environment and is never sent to the model or logged.
 - Fault injection has no authentication and relies on binding to 127.0.0.1; it is a local demo
   mechanism only.
+- Tempo's OTLP receiver is published on 127.0.0.1:4318 so the host-side runner can export spans;
+  anything local can write spans to it.
+- Grafana allows anonymous access as a Viewer that may use Explore (`viewers_can_edit`,
+  deprecated in Grafana but the narrowest setting that allows Explore), with the login form
+  disabled and read-only provisioned datasources. It relies on binding to 127.0.0.1.
 
 ## Observability
 
@@ -111,5 +123,17 @@ per tool), token usage, and estimated cost.
   one access-log line (`method`, `route`, `status`, `duration_ms`). Records logged during a
   request carry `request_id`, `trace_id`, and `span_id`. Telemetry export failures are logged
   to stdout only.
-- Agent: structured logs per LLM request (model, stop reason, latency, tokens) and per tool call
-  (tool, input, duration, outcome), plus an investigation summary. Agent tracing is Milestone 2.
+- Agent logs: structured logs per LLM request (model, stop reason, latency, tokens) and per tool
+  call (tool, input, duration, outcome), plus an investigation summary with the trace ID. They go
+  to stderr only.
+- Agent traces: when an OTLP traces endpoint is configured (`make eval` sets Tempo's), each
+  investigation is one trace under the service name `ai-sre-agent`. The root `investigation`
+  span records the incident, budgets, outcome (`diagnosed`, `budget_exhausted`, `timeout`,
+  `model_stopped`, `cancelled`, `llm_error`), the accepted root-cause code, and totals. Its
+  children are one `llm.request` span per model request (model, finish reason, tokens, cost, and
+  error kind on failure, using GenAI semantic-convention names where they exist) and one
+  `tool.<name>` span per tool call from the registry (tool, input and output sizes, error code;
+  `tool.unknown` for names that are not registered, which keeps model-chosen names out of span
+  names). The request whose diagnosis was accepted is named `llm.final_diagnosis`. LLM spans end
+  when the response arrives, so tool calls are their siblings, and rejected diagnoses are
+  `diagnosis.rejected` events on the root span.
