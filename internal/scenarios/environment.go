@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -128,7 +129,8 @@ func (e Environment) GenerateTraffic(ctx context.Context, rps int) TrafficStats 
 }
 
 // WaitForTrigger polls t.Query until its value exceeds t.Above, returning the
-// value that fired, or an error after t.TimeoutSeconds.
+// value that fired, or an error after t.TimeoutSeconds. NaN never fires: a
+// ratio over an empty window (0/0) is NaN, not an alert.
 func (e Environment) WaitForTrigger(ctx context.Context, t Trigger) (float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(t.TimeoutSeconds)*time.Second)
 	defer cancel()
@@ -138,7 +140,7 @@ func (e Environment) WaitForTrigger(ctx context.Context, t Trigger) (float64, er
 		if err != nil {
 			return err
 		}
-		if v <= t.Above {
+		if math.IsNaN(v) || v <= t.Above {
 			return fmt.Errorf("value %v not above %v", v, t.Above)
 		}
 		fired = v

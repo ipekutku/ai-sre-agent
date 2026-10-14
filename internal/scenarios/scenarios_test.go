@@ -7,31 +7,54 @@ import (
 	"testing"
 )
 
-// The repository's own scenarios must always load.
-func TestLoadRepositoryScenario(t *testing.T) {
-	s, err := Load(filepath.Join("..", "..", "scenarios", "inventory-latency"))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if s.ID != "inventory-latency" || s.Incident.IncidentID != "inc-001" || s.Incident.Service != "checkout-api" {
-		t.Errorf("scenario = %+v", s)
-	}
-	if s.Fault != (Fault{Service: "inventory-api", Type: "latency", LatencyMS: 800}) {
-		t.Errorf("fault = %+v", s.Fault)
-	}
-}
-
-// The incident must describe the symptom only; it must not name the faulty
-// service or the root-cause code.
-func TestRepositoryIncidentDoesNotRevealCause(t *testing.T) {
-	s, err := Load(filepath.Join("..", "..", "scenarios", "inventory-latency"))
+// loadRepositoryScenarios loads every directory under the repository's
+// scenarios/, failing the test if any of them does not load.
+func loadRepositoryScenarios(t *testing.T) []Scenario {
+	t.Helper()
+	root := filepath.Join("..", "..", "scenarios")
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	inc := strings.ToLower(s.Incident.Alert + " " + s.Incident.Service + " " + s.Incident.Description)
-	for _, leak := range []string{"inventory", "downstream", "fault", "injected"} {
-		if strings.Contains(inc, leak) {
-			t.Errorf("incident mentions %q: %+v", leak, s.Incident)
+	var all []Scenario
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		s, err := Load(filepath.Join(root, e.Name()))
+		if err != nil {
+			t.Errorf("Load: %v", err)
+			continue
+		}
+		all = append(all, s)
+	}
+	if len(all) == 0 {
+		t.Fatal("no scenarios loaded")
+	}
+	return all
+}
+
+// The repository's own scenarios must always load, and each needs its own
+// incident ID because the evaluator checks the diagnosis against it.
+func TestLoadRepositoryScenarios(t *testing.T) {
+	seen := map[string]string{}
+	for _, s := range loadRepositoryScenarios(t) {
+		if other, ok := seen[s.Incident.IncidentID]; ok {
+			t.Errorf("scenarios %s and %s share incident ID %q", other, s.ID, s.Incident.IncidentID)
+		}
+		seen[s.Incident.IncidentID] = s.ID
+	}
+}
+
+// Each incident must describe the symptom only; it must not name the faulty
+// service or the root-cause code.
+func TestRepositoryIncidentsDoNotRevealCause(t *testing.T) {
+	for _, s := range loadRepositoryScenarios(t) {
+		inc := strings.ToLower(s.Incident.Alert + " " + s.Incident.Service + " " + s.Incident.Description)
+		for _, leak := range []string{"inventory", "downstream", "fault", "injected"} {
+			if strings.Contains(inc, leak) {
+				t.Errorf("%s: incident mentions %q: %+v", s.ID, leak, s.Incident)
+			}
 		}
 	}
 }

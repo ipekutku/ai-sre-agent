@@ -39,10 +39,43 @@ func correctDiagnosis() diagnosis.Diagnosis {
 	}
 }
 
-func TestLoadRepositoryGroundTruth(t *testing.T) {
+// Every repository scenario needs a ground truth whose code the agent can
+// choose, and its incident must not contain that code.
+func TestLoadRepositoryGroundTruths(t *testing.T) {
+	root := filepath.Join("..", "..", "scenarios")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		s, err := scenarios.Load(dir)
+		if err != nil {
+			t.Errorf("load scenario: %v", err)
+			continue
+		}
+		gt, err := LoadGroundTruth(dir)
+		if err != nil {
+			t.Errorf("load ground truth: %v", err)
+			continue
+		}
+		inc := strings.ToUpper(s.Incident.Alert + " " + s.Incident.Description)
+		if code := gt.ExpectedRootCause.Code; strings.Contains(inc, code) || strings.Contains(inc, strings.ReplaceAll(code, "_", " ")) {
+			t.Errorf("%s: incident reveals expected code %s: %+v", s.ID, code, s.Incident)
+		}
+		n++
+	}
+	if n == 0 {
+		t.Fatal("no scenarios loaded")
+	}
+
 	_, gt := loadRepoScenario(t)
 	if gt.ExpectedRootCause.Code != "INVENTORY_DOWNSTREAM_LATENCY" {
-		t.Errorf("expected code = %q", gt.ExpectedRootCause.Code)
+		t.Errorf("%s expected code = %q", repoScenarioDir, gt.ExpectedRootCause.Code)
 	}
 }
 

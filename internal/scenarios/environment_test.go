@@ -167,10 +167,12 @@ func TestWaitForTrigger(t *testing.T) {
 		t.Fatalf("WaitForTrigger = %v, %v; want 0.98", v, err)
 	}
 
-	f.set("0.02")
 	trigger.TimeoutSeconds = 1
-	if _, err := env.WaitForTrigger(context.Background(), trigger); err == nil || !strings.Contains(err.Error(), "not met within 1s") {
-		t.Errorf("err = %v, want timeout", err)
+	for _, v := range []string{"0.02", "NaN"} {
+		f.set(v)
+		if _, err := env.WaitForTrigger(context.Background(), trigger); err == nil || !strings.Contains(err.Error(), "not met within 1s") {
+			t.Errorf("value %s: err = %v, want timeout", v, err)
+		}
 	}
 }
 

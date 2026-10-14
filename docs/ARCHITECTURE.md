@@ -47,7 +47,7 @@ direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
 | Agent | `internal/agent` | investigation loop, budgets, `submit_diagnosis` validation, stats, investigation and LLM spans |
 | Diagnosis | `internal/diagnosis` | diagnosis schema and the closed root-cause code list |
 | Evaluation | `internal/evaluation` | loads ground truth; compares diagnosis; report |
-| Runner | `cmd/scenario-runner` | orchestrates one scenario end to end (`make eval`); sets up the agent's tracer |
+| Runner | `cmd/scenario-runner` | orchestrates one scenario end to end (`make eval`; `make eval-all` runs it for every scenario); sets up the agent's tracer |
 
 ## Investigation flow
 
@@ -85,7 +85,8 @@ The agent must infer the cause from observations only.
 - `query_logs` builds LogQL the same way, returns only entries from catalog services, and drops
   any entry marked `component=fault-admin`, both in the query and on the response, as a second
   line of defence behind the stdout-only admin logger.
-- The system prompt and incident text are tested to contain no scenario details.
+- The system prompt and every scenario's incident text are tested to contain no scenario
+  details: no faulty service, no fault wording, and not the scenario's expected code.
 
 ## Evaluation
 
@@ -95,6 +96,11 @@ from a fixed list ([ADR 0002](adr/0002-closed-root-cause-taxonomy.md)).
 
 The runner also reports investigation duration, LLM requests, tool calls (total, failed, and
 per tool), token usage, estimated cost, and the investigation's trace ID.
+
+`make eval-all` runs every scenario in `scenarios/` through the same runner, one after another,
+and lists PASS or FAIL per scenario. It is a Makefile loop, not a separate framework. The
+scenarios share one environment: a cooldown separates their faults in time, but an
+investigation's range queries can still reach an earlier scenario's fault.
 
 ## Security boundaries
 

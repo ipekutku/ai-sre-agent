@@ -1,0 +1,24 @@
+# Read by the scenario runner. Only `incident` is given to the investigation agent.
+id: inventory-errors
+description: >-
+  inventory-api fails half of its requests with 500, so checkout-api returns
+  502 for the checkouts that depend on them.
+
+incident:
+  incident_id: inc-002
+  alert: HighCheckoutErrorRate
+  service: checkout-api
+  severity: critical
+  description: 5xx response ratio exceeded threshold
+
+fault:
+  service: inventory-api
+  type: errors
+  error_percent: 50
+
+# The incident is raised once this alert condition holds (more than 20% of checkout-api
+# requests answered with 5xx).
+trigger:
+  query: sum(rate(http_server_request_duration_seconds_count{job="checkout-api", route="/checkout", status=~"5.."}[30s])) / sum(rate(http_server_request_duration_seconds_count{job="checkout-api", route="/checkout"}[30s]))
+  above: 0.2
+  timeout_seconds: 120
