@@ -54,3 +54,9 @@ Decisions needed:
   added. Viewing traces without a UI means using the Tempo API until a UI is added.
 - **Trusting incoming trace context.** Services accept `traceparent` from any caller. This is
   fine for a local demo whose only external caller is the scenario runner, which sends none.
+
+## Notes
+
+- 2026-10-14: Logs are now exported to Loki (ADR 0004). Because traces and logs go to different
+  backends, Compose sets the per-signal `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` instead of
+  `OTEL_EXPORTER_OTLP_ENDPOINT`.

@@ -28,29 +28,32 @@ func env(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
 
-func TestEnabled(t *testing.T) {
+func TestSignalsEnabled(t *testing.T) {
 	tests := []struct {
-		name string
-		env  map[string]string
-		want bool
+		name                 string
+		env                  map[string]string
+		wantTraces, wantLogs bool
 	}{
-		{"no endpoint", map[string]string{}, false},
-		{"endpoint", map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318"}, true},
-		{"traces endpoint", map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://tempo:4318/v1/traces"}, true},
-		{"disabled", map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318", "OTEL_SDK_DISABLED": "true"}, false},
+		{"no endpoint", map[string]string{}, false, false},
+		{"endpoint", map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318"}, true, true},
+		{"traces endpoint", map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://tempo:4318/v1/traces"}, true, false},
+		{"logs endpoint", map[string]string{"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://loki:3100/otlp/v1/logs"}, false, true},
+		{"disabled", map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318", "OTEL_SDK_DISABLED": "true"}, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := Enabled(env(tt.env)); got != tt.want {
-				t.Errorf("Enabled = %v, want %v", got, tt.want)
+			if got := TracesEnabled(env(tt.env)); got != tt.wantTraces {
+				t.Errorf("TracesEnabled = %v, want %v", got, tt.wantTraces)
+			}
+			if got := LogsEnabled(env(tt.env)); got != tt.wantLogs {
+				t.Errorf("LogsEnabled = %v, want %v", got, tt.wantLogs)
 			}
 		})
 	}
 }
 
 func TestSetupWithoutEndpointIsNoop(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	tp, shutdown, err := Setup(context.Background(), logger, "test-service", env(nil))
+	p, shutdown, err := Setup(context.Background(), discardLogger(), "test-service", env(nil))
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -60,30 +63,47 @@ func TestSetupWithoutEndpointIsNoop(t *testing.T) {
 		}
 	}()
 
-	_, span := tp.Tracer("test").Start(context.Background(), "op")
+	_, span := p.Tracer.Tracer("test").Start(context.Background(), "op")
 	defer span.End()
 	if span.IsRecording() {
 		t.Error("span is recording without an OTLP endpoint")
 	}
+	if p.Logger != nil {
+		t.Error("logger provider is set without an OTLP endpoint")
+	}
 }
 
-func TestSetupWithEndpoint(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	// Nothing listens here; export failures must not surface as errors.
-	tp, shutdown, err := Setup(context.Background(), logger, "test-service",
-		env(map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1"}))
-	if err != nil {
-		t.Fatalf("Setup: %v", err)
+func TestSetupPerSignal(t *testing.T) {
+	tests := []struct {
+		name                 string
+		env                  map[string]string
+		wantTraces, wantLogs bool
+	}{
+		// Nothing listens on these; export failures must not surface as errors.
+		{"both", map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1"}, true, true},
+		{"traces only", map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://127.0.0.1:1/v1/traces"}, true, false},
+		{"logs only", map[string]string{"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://127.0.0.1:1/otlp/v1/logs"}, false, true},
 	}
-	_, span := tp.Tracer("test").Start(context.Background(), "op")
-	if !span.IsRecording() {
-		t.Error("span is not recording with an OTLP endpoint configured")
-	}
-	span.End()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, shutdown, err := Setup(context.Background(), discardLogger(), "test-service", env(tt.env))
+			if err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			_, span := p.Tracer.Tracer("test").Start(context.Background(), "op")
+			if span.IsRecording() != tt.wantTraces {
+				t.Errorf("span recording = %v, want %v", span.IsRecording(), tt.wantTraces)
+			}
+			span.End()
+			if (p.Logger != nil) != tt.wantLogs {
+				t.Errorf("logger provider set = %v, want %v", p.Logger != nil, tt.wantLogs)
+			}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = shutdown(ctx) // the failed flush is reported to the error handler
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_ = shutdown(ctx) // the failed flush is reported to the error handler
+		})
+	}
 }
 
 // TestCheckoutInventoryTrace checks the trace one checkout request produces
@@ -92,9 +112,9 @@ func TestSetupWithEndpoint(t *testing.T) {
 // trace with the expected parents.
 func TestCheckoutInventoryTrace(t *testing.T) {
 	rec, tp := newRecorder()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := discardLogger()
 
-	inventorySrv := httptest.NewServer(Handler(tp,
+	inventorySrv := httptest.NewServer(Handler(tp, logger,
 		httpmetrics.Handler(httpmetrics.NewRegistry(), inventory.NewHandler(inventory.NewLatency(0))), "/metrics"))
 	defer inventorySrv.Close()
 
@@ -103,7 +123,7 @@ func TestCheckoutInventoryTrace(t *testing.T) {
 		Timeout:   2 * time.Second,
 		Transport: Transport(tp, "inventory-api", httpmetrics.NewClient(reg).Transport("inventory-api", nil)),
 	})
-	checkoutSrv := httptest.NewServer(Handler(tp, httpmetrics.Handler(reg, checkout.NewHandler(logger, client)), "/metrics"))
+	checkoutSrv := httptest.NewServer(Handler(tp, logger, httpmetrics.Handler(reg, checkout.NewHandler(logger, client)), "/metrics"))
 	defer checkoutSrv.Close()
 
 	get(t, checkoutSrv.URL+"/checkout?sku=abc")
@@ -150,7 +170,7 @@ func TestCheckoutInventoryTrace(t *testing.T) {
 
 func TestHandlerSkipsUntracedPaths(t *testing.T) {
 	rec, tp := newRecorder()
-	srv := httptest.NewServer(Handler(tp, httpmetrics.Handler(httpmetrics.NewRegistry(), testApp()), "/metrics"))
+	srv := httptest.NewServer(Handler(tp, discardLogger(), httpmetrics.Handler(httpmetrics.NewRegistry(), testApp()), "/metrics"))
 	defer srv.Close()
 
 	get(t, srv.URL+"/metrics")
@@ -167,7 +187,7 @@ func TestHandlerSkipsUntracedPaths(t *testing.T) {
 // come from the matched pattern.
 func TestHandlerPreservesMetricRoutes(t *testing.T) {
 	_, tp := newRecorder()
-	srv := httptest.NewServer(Handler(tp, httpmetrics.Handler(httpmetrics.NewRegistry(), testApp()), "/metrics"))
+	srv := httptest.NewServer(Handler(tp, discardLogger(), httpmetrics.Handler(httpmetrics.NewRegistry(), testApp()), "/metrics"))
 	defer srv.Close()
 
 	get(t, srv.URL+"/items/1")
@@ -197,6 +217,10 @@ func TestTransportPropagatesWithoutServerSpan(t *testing.T) {
 	if !strings.Contains(traceparent, span.SpanContext().TraceID().String()) {
 		t.Errorf("traceparent = %q, want trace ID %s", traceparent, span.SpanContext().TraceID())
 	}
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 func testApp() http.Handler {

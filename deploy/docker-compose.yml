@@ -12,13 +12,15 @@ services:
       ADDR: ":8081"
       ADMIN_ADDR: ":9081"
       BASE_LATENCY: "20ms"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "http://tempo:4318"
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://tempo:4318/v1/traces"
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://loki:3100/otlp/v1/logs"
     ports:
       - "127.0.0.1:8081:8081"
       # Fault-injection admin API. Not scraped by Prometheus.
       - "127.0.0.1:9081:9081"
     depends_on:
       - tempo
+      - loki
 
   checkout-api:
     build:
@@ -29,12 +31,14 @@ services:
       ADDR: ":8080"
       INVENTORY_URL: "http://inventory-api:8081"
       INVENTORY_TIMEOUT: "2s"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "http://tempo:4318"
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://tempo:4318/v1/traces"
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://loki:3100/otlp/v1/logs"
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
       - inventory-api
       - tempo
+      - loki
 
   prometheus:
     image: prom/prometheus:v3.5.0
@@ -58,3 +62,14 @@ services:
       - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
     ports:
       - "127.0.0.1:3200:3200"
+
+  # Log backend. Services push logs to its native OTLP endpoint
+  # (/otlp/v1/logs); its query API is published on 3100. The fault admin API's
+  # logs are never sent here (ADR 0001).
+  loki:
+    image: grafana/loki:3.7.8
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./loki/loki.yaml:/etc/loki/loki.yaml:ro
+    ports:
+      - "127.0.0.1:3100:3100"
