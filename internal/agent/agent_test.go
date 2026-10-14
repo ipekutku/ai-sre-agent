@@ -84,15 +84,22 @@ func (e *echoTool) Call(_ context.Context, in json.RawMessage) (any, error) {
 	return map[string]json.RawMessage{"echo": in}, nil
 }
 
+func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
 func newAgent(t *testing.T, client llm.Client, cfg Config) (*Agent, *echoTool) {
 	t.Helper()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	tool := &echoTool{}
-	reg, err := tools.NewRegistry(logger, tools.Options{}, tool)
+	return New(client, mustRegistry(t, cfg, tool), discardLogger(), cfg), tool
+}
+
+// mustRegistry returns a registry of ts that traces with cfg's provider.
+func mustRegistry(t *testing.T, cfg Config, ts ...tools.Tool) *tools.Registry {
+	t.Helper()
+	reg, err := tools.NewRegistry(discardLogger(), tools.Options{TracerProvider: cfg.TracerProvider}, ts...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(client, reg, logger, cfg), tool
+	return reg
 }
 
 func TestInvestigateHappyPath(t *testing.T) {

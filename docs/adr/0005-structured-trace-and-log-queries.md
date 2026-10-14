@@ -57,3 +57,12 @@ is fragile.
 - Tempo search does not return a trace's total span count or error status, so search results
   show the matching spans (with their status) instead. The model gets the full picture by
   fetching a trace by ID.
+
+## Notes
+
+- 2026-10-15: Agent investigations are now exported to Tempo under the service name
+  `ai-sre-agent`, as anticipated above. That name is not in the catalog, so it cannot be searched
+  for, and fetching an agent trace by ID returns no spans. This was checked against a live Tempo as
+  well as in the existing tests. Agent spans also carry no prompts, model output, or tool payloads,
+  so even a gap in the filter would expose only counts, sizes, codes, and the agent's own earlier
+  root-cause code.

@@ -60,3 +60,8 @@ Decisions needed:
 - 2026-10-14: Logs are now exported to Loki (ADR 0004). Because traces and logs go to different
   backends, Compose sets the per-signal `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` instead of
   `OTEL_EXPORTER_OTLP_ENDPOINT`.
+- 2026-10-15: The agent's investigations are now traced too (service name `ai-sre-agent`). The
+  scenario runner runs on the host, so Compose also publishes Tempo's OTLP receiver on
+  `127.0.0.1:4318`, and `make eval` points `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` at it. Still no
+  Collector. Grafana (`grafana/grafana:13.2.4`, provisioned datasources, no dashboards) was added
+  as the trace UI, so viewing traces no longer needs the raw Tempo API.
