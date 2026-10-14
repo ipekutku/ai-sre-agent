@@ -68,7 +68,7 @@ func TestAdminAPIIsNotTraced(t *testing.T) {
 	service, admin := handlers(logger, logger, config{baseLatency: 0}, tp)
 
 	for _, req := range []*http.Request{
-		httptest.NewRequest(http.MethodPut, "/fault", strings.NewReader(`{"latency_ms": 5}`)),
+		httptest.NewRequest(http.MethodPut, "/fault", strings.NewReader(`{"latency_ms": 5, "error_percent": 100}`)),
 		httptest.NewRequest(http.MethodGet, "/fault", nil),
 	} {
 		w := httptest.NewRecorder()
@@ -83,13 +83,23 @@ func TestAdminAPIIsNotTraced(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	service.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/inventory", nil))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("service status = %d, want 500 from the error fault", w.Code)
+	}
 	spans := rec.Ended()
 	if len(spans) != 1 || spans[0].Name() != "GET /inventory" {
 		t.Fatalf("service spans = %d, want one GET /inventory span", len(spans))
 	}
+	text := spans[0].Status().Description
 	for _, a := range spans[0].Attributes() {
-		if strings.Contains(strings.ToLower(string(a.Key)+a.Value.Emit()), "fault") {
-			t.Errorf("span attribute %s=%s mentions the fault", a.Key, a.Value.Emit())
+		text += " " + string(a.Key) + "=" + a.Value.Emit()
+	}
+	for _, e := range spans[0].Events() {
+		text += " " + e.Name
+	}
+	for _, leak := range []string{"fault", "inject"} {
+		if strings.Contains(strings.ToLower(text), leak) {
+			t.Errorf("span mentions %q: %s", leak, text)
 		}
 	}
 }
@@ -103,16 +113,18 @@ func TestAdminLogsAreNotExported(t *testing.T) {
 	serviceLogger, adminLogger := loggers(&local, lp)
 	service, admin := handlers(serviceLogger, adminLogger, config{baseLatency: 0}, tracenoop.NewTracerProvider())
 
-	for _, req := range []*http.Request{
-		httptest.NewRequest(http.MethodPut, "/fault", strings.NewReader(`{"latency_ms": 5}`)),
-		httptest.NewRequest(http.MethodDelete, "/fault", nil),
-	} {
+	adminDo := func(method, body string) {
+		t.Helper()
 		w := httptest.NewRecorder()
-		admin.ServeHTTP(w, req)
+		admin.ServeHTTP(w, httptest.NewRequest(method, "/fault", strings.NewReader(body)))
 		if w.Code != http.StatusOK {
-			t.Fatalf("%s /fault: status %d", req.Method, w.Code)
+			t.Fatalf("%s /fault: status %d", method, w.Code)
 		}
 	}
+	// One request fails under the error fault, one succeeds after clearing it.
+	adminDo(http.MethodPut, `{"latency_ms": 5, "error_percent": 100}`)
+	service.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/inventory", nil))
+	adminDo(http.MethodDelete, "")
 	service.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/inventory", nil))
 
 	if !strings.Contains(local.String(), `"component":"fault-admin"`) {
@@ -120,17 +132,25 @@ func TestAdminLogsAreNotExported(t *testing.T) {
 	}
 	records := exp.records
 	if len(records) == 0 {
-		t.Fatal("service request exported no records; the exporter is not wired")
+		t.Fatal("service requests exported no records; the exporter is not wired")
 	}
+	var sawFailure bool
 	for _, r := range records {
-		text := strings.ToLower(r.Body().AsString())
+		body := r.Body().AsString()
+		sawFailure = sawFailure || body == "inventory request failed"
+		text := strings.ToLower(body)
 		r.WalkAttributes(func(kv attribute.KeyValue) bool {
 			text += " " + strings.ToLower(string(kv.Key)+"="+kv.Value.Emit())
 			return true
 		})
-		if strings.Contains(text, "fault") {
-			t.Errorf("exported record mentions the fault: %s", text)
+		for _, leak := range []string{"fault", "inject"} {
+			if strings.Contains(text, leak) {
+				t.Errorf("exported record mentions %q: %s", leak, text)
+			}
 		}
+	}
+	if !sawFailure {
+		t.Error("the failed request's error log was not exported")
 	}
 }
 

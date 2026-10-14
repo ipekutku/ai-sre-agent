@@ -66,8 +66,15 @@ func (e Environment) ApplyFault(ctx context.Context, f Fault) error {
 	if err := f.Validate(); err != nil {
 		return err
 	}
-	body := fmt.Sprintf(`{"latency_ms": %d}`, f.LatencyMS)
-	return e.do(ctx, http.MethodPut, e.InventoryAdminURL+"/fault", body)
+	// Validate leaves exactly one field set; the API treats an omitted one as off.
+	body, err := json.Marshal(struct {
+		LatencyMS    int `json:"latency_ms,omitempty"`
+		ErrorPercent int `json:"error_percent,omitempty"`
+	}{f.LatencyMS, f.ErrorPercent})
+	if err != nil {
+		return err
+	}
+	return e.do(ctx, http.MethodPut, e.InventoryAdminURL+"/fault", string(body))
 }
 
 // ClearFault restores normal behaviour.

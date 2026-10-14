@@ -49,11 +49,14 @@ type Trigger struct {
 	TimeoutSeconds int     `yaml:"timeout_seconds"`
 }
 
-// Fault describes the failure the scenario runner injects.
+// Fault describes the failure the scenario runner injects. Each type uses
+// only its own parameter: latency_ms for "latency", error_percent for
+// "errors".
 type Fault struct {
-	Service   string `yaml:"service"`
-	Type      string `yaml:"type"`
-	LatencyMS int    `yaml:"latency_ms"`
+	Service      string `yaml:"service"`
+	Type         string `yaml:"type"`
+	LatencyMS    int    `yaml:"latency_ms"`
+	ErrorPercent int    `yaml:"error_percent"`
 }
 
 // Load reads and validates dir/scenario.yaml. The scenario ID must match the
@@ -102,16 +105,28 @@ func (s Scenario) Validate() error {
 }
 
 // Validate reports whether f is a fault the environment can inject.
-// Only inventory-api latency is supported so far.
+// Only inventory-api supports fault injection: latency or HTTP errors.
 func (f Fault) Validate() error {
 	if f.Service != "inventory-api" {
 		return fmt.Errorf("service %q does not support fault injection", f.Service)
 	}
-	if f.Type != "latency" {
-		return fmt.Errorf("unsupported type %q (supported: latency)", f.Type)
-	}
-	if f.LatencyMS <= 0 || f.LatencyMS > maxFaultLatencyMS {
-		return fmt.Errorf("latency_ms must be in (0, %d], got %d", maxFaultLatencyMS, f.LatencyMS)
+	switch f.Type {
+	case "latency":
+		if f.LatencyMS <= 0 || f.LatencyMS > maxFaultLatencyMS {
+			return fmt.Errorf("latency_ms must be in (0, %d], got %d", maxFaultLatencyMS, f.LatencyMS)
+		}
+		if f.ErrorPercent != 0 {
+			return errors.New("error_percent applies only to type errors")
+		}
+	case "errors":
+		if f.ErrorPercent <= 0 || f.ErrorPercent > 100 {
+			return fmt.Errorf("error_percent must be in (0, 100], got %d", f.ErrorPercent)
+		}
+		if f.LatencyMS != 0 {
+			return errors.New("latency_ms applies only to type latency")
+		}
+	default:
+		return fmt.Errorf("unsupported type %q (supported: latency, errors)", f.Type)
 	}
 	return nil
 }

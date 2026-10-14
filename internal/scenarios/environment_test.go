@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -109,11 +110,14 @@ func TestFaultLifecycle(t *testing.T) {
 	if err := env.ClearFault(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.ApplyFault(ctx, Fault{Service: "inventory-api", Type: "errors"}); err == nil {
-		t.Error("unsupported fault should be rejected before calling the API")
+	if err := env.ApplyFault(ctx, Fault{Service: "inventory-api", Type: "errors", ErrorPercent: 50}); err != nil {
+		t.Fatal(err)
 	}
-	want := []string{`PUT {"latency_ms": 800}`, "DELETE"}
-	if len(f.faults) != 2 || f.faults[0] != want[0] || f.faults[1] != want[1] {
+	if err := env.ApplyFault(ctx, Fault{Service: "inventory-api", Type: "errors"}); err == nil {
+		t.Error("invalid fault should be rejected before calling the API")
+	}
+	want := []string{`PUT {"latency_ms":800}`, "DELETE", `PUT {"error_percent":50}`}
+	if !slices.Equal(f.faults, want) {
 		t.Errorf("fault API calls = %q, want %q", f.faults, want)
 	}
 }

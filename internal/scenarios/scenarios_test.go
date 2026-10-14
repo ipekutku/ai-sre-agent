@@ -54,6 +54,18 @@ trigger:
   timeout_seconds: 60
 `
 
+var errorsYAML = strings.Replace(validYAML, "type: latency\n  latency_ms: 800", "type: errors\n  error_percent: 50", 1)
+
+func TestLoadErrorsFault(t *testing.T) {
+	s, err := Load(writeScenario(t, "demo", errorsYAML))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if s.Fault != (Fault{Service: "inventory-api", Type: "errors", ErrorPercent: 50}) {
+		t.Errorf("fault = %+v", s.Fault)
+	}
+}
+
 func writeScenario(t *testing.T, name, content string) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), name)
@@ -77,10 +89,14 @@ func TestLoadRejects(t *testing.T) {
 		{"unknown field", "demo", validYAML + "ground_truth: X\n", "field ground_truth not found"},
 		{"bad id", "Demo_1", strings.Replace(validYAML, "id: demo", "id: Demo_1", 1), "kebab-case"},
 		{"invalid incident", "demo", strings.Replace(validYAML, "severity: warning", "severity: sev1", 1), "incident: severity"},
-		{"unsupported fault type", "demo", strings.Replace(validYAML, "type: latency", "type: errors", 1), "unsupported type"},
+		{"unsupported fault type", "demo", strings.Replace(validYAML, "type: latency", "type: crash", 1), "unsupported type"},
 		{"unsupported fault service", "demo", strings.Replace(validYAML, "service: inventory-api", "service: checkout-api", 1), "does not support fault injection"},
 		{"zero latency", "demo", strings.Replace(validYAML, "latency_ms: 800", "latency_ms: 0", 1), "latency_ms must be"},
 		{"latency above cap", "demo", strings.Replace(validYAML, "latency_ms: 800", "latency_ms: 60000", 1), "latency_ms must be"},
+		{"latency with error_percent", "demo", strings.Replace(validYAML, "latency_ms: 800", "latency_ms: 800\n  error_percent: 50", 1), "error_percent applies only"},
+		{"errors without error_percent", "demo", strings.Replace(errorsYAML, "  error_percent: 50\n", "", 1), "error_percent must be"},
+		{"errors above 100 percent", "demo", strings.Replace(errorsYAML, "error_percent: 50", "error_percent: 101", 1), "error_percent must be"},
+		{"errors with latency_ms", "demo", strings.Replace(errorsYAML, "error_percent: 50", "error_percent: 50\n  latency_ms: 800", 1), "latency_ms applies only"},
 		{"not yaml", "demo", "id: [", "parse"},
 		{"missing trigger query", "demo", strings.Replace(validYAML, "query: up", "query: ''", 1), "trigger: query is required"},
 		{"bad trigger timeout", "demo", strings.Replace(validYAML, "timeout_seconds: 60", "timeout_seconds: 0", 1), "timeout_seconds"},
