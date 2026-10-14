@@ -30,7 +30,8 @@ Investigate before concluding:
 - Check the alerted service and the services it depends on.
 - Compare current behaviour with earlier behaviour (range queries help).
 - Metrics show aggregate behaviour; traces show how individual requests spent their time and
-  where they failed across services.
+  where they failed across services; logs record what each service reported while handling a
+  request, including error messages.
 - Separate a service's own latency and errors from those of its dependencies, and confirm a
   suspected cause from more than one angle before accepting it.
 - Rule out the plausible alternatives the evidence allows you to rule out.

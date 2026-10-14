@@ -23,10 +23,11 @@ direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
          v                 v             v         v
       +---------------------+    Claude API    query_metrics ----> Prometheus :9090
       |  Prometheus :9090   |                  query_traces -----> Tempo :3200
-      +---------------------+                  inspect_service --> /healthz + catalog
+      +---------------------+                  query_logs -------> Loki :3100
+                                               inspect_service --> /healthz + catalog
 
   checkout-api, inventory-api --OTLP/HTTP spans--> Tempo :3200
-  checkout-api, inventory-api --OTLP/HTTP logs---> Loki  :3100 (not yet queried by the agent)
+  checkout-api, inventory-api --OTLP/HTTP logs---> Loki  :3100
 ```
 
 ## Components
@@ -39,7 +40,7 @@ direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
 | Telemetry | `internal/telemetry` | OpenTelemetry setup (OTLP/HTTP export of spans and logs, each a no-op without an endpoint); server and client spans with W3C propagation; request IDs; access logs; the JSON logger with trace correlation |
 | Environment | `deploy/` | Docker Compose: both services, Prometheus (5 s scrape), Tempo, and Loki; ports on 127.0.0.1 |
 | Scenarios | `scenarios/<id>/`, `internal/scenarios` | incident, fault, alert trigger; environment control for the runner |
-| Tools | `internal/tools` | `query_metrics`, `query_traces`, `inspect_service`, and the registry (validation, timeouts, size limits, logging) |
+| Tools | `internal/tools` | `query_metrics`, `query_traces`, `query_logs`, `inspect_service`, and the registry (validation, timeouts, size limits, logging) |
 | LLM boundary | `internal/llm`, `internal/llm/anthropic` | provider-independent `Client`; Claude implementation |
 | Agent | `internal/agent` | investigation loop, budgets, `submit_diagnosis` validation, stats |
 | Diagnosis | `internal/diagnosis` | diagnosis schema and the closed root-cause code list |
@@ -49,8 +50,8 @@ direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
 ## Investigation flow
 
 1. The runner gives the agent an `incident.Incident` (alert name, service, severity, description).
-2. The agent sends Claude a fixed system prompt, the incident, and four tools:
-   `query_metrics`, `query_traces`, `inspect_service`, `submit_diagnosis`.
+2. The agent sends Claude a fixed system prompt, the incident, and five tools:
+   `query_metrics`, `query_traces`, `query_logs`, `inspect_service`, `submit_diagnosis`.
 3. Each `tool_use` is dispatched through the tool registry; every one gets a `tool_result`
    (failures are returned to the model as structured errors).
 4. The loop repeats until Claude calls `submit_diagnosis` with a valid diagnosis, or a budget
@@ -74,6 +75,9 @@ The agent must infer the cause from observations only.
 - `query_traces` builds TraceQL from validated, structured input and returns only spans from
   catalog services, so spans from any other source (such as the agent itself, once traced) never
   reach the model ([ADR 0005](adr/0005-structured-trace-and-log-queries.md)).
+- `query_logs` builds LogQL the same way, returns only entries from catalog services, and drops
+  any entry marked `component=fault-admin`, both in the query and on the response, as a second
+  line of defence behind the stdout-only admin logger.
 - The system prompt and incident text are tested to contain no scenario details.
 
 ## Evaluation
@@ -88,9 +92,9 @@ per tool), token usage, and estimated cost.
 ## Security boundaries
 
 - Tools are read-only: PromQL query endpoints only, Tempo search and trace-by-ID endpoints only,
-  and health endpoints from a fixed catalog.
+  the Loki `query_range` endpoint only, and health endpoints from a fixed catalog.
 - All model-generated tool input is decoded strictly and validated; unknown tools are rejected.
-- Tool output, Prometheus and Tempo responses, and health responses are size-limited; every call has a timeout.
+- Tool output, Prometheus, Tempo, and Loki responses, and health responses are size-limited; every call has a timeout.
 - The API key is read by the SDK from the environment and is never sent to the model or logged.
 - Fault injection has no authentication and relies on binding to 127.0.0.1; it is a local demo
   mechanism only.

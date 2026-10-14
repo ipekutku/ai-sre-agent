@@ -64,12 +64,24 @@ func NewQueryTraces(baseURL string, services []string, httpClient *http.Client) 
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, fmt.Errorf("tempo URL must be an absolute http(s) URL, got %q", baseURL)
 	}
+	m, err := serviceSet(services)
+	if err != nil {
+		return nil, err
+	}
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	return &QueryTraces{baseURL: strings.TrimRight(baseURL, "/"), services: m, httpClient: httpClient, now: time.Now}, nil
+}
+
+// serviceSet validates the catalog services a query tool may see.
+func serviceSet(services []string) (map[string]bool, error) {
 	if len(services) == 0 {
 		return nil, fmt.Errorf("at least one service is required")
 	}
 	m := make(map[string]bool, len(services))
 	for _, s := range services {
-		// Names are embedded in TraceQL string literals; keep them plain.
+		// Names are embedded in query string literals; keep them plain.
 		if !validServiceName(s) {
 			return nil, fmt.Errorf("invalid service name %q", s)
 		}
@@ -78,10 +90,17 @@ func NewQueryTraces(baseURL string, services []string, httpClient *http.Client) 
 		}
 		m[s] = true
 	}
-	if httpClient == nil {
-		httpClient = http.DefaultClient
+	return m, nil
+}
+
+// sortedNames returns the services in a set, sorted.
+func sortedNames(services map[string]bool) []string {
+	names := make([]string, 0, len(services))
+	for n := range services {
+		names = append(names, n)
 	}
-	return &QueryTraces{baseURL: strings.TrimRight(baseURL, "/"), services: m, httpClient: httpClient, now: time.Now}, nil
+	sort.Strings(names)
+	return names
 }
 
 func validServiceName(s string) bool {
@@ -434,14 +453,7 @@ func (q *QueryTraces) getJSON(ctx context.Context, path string, v any) (int, err
 	return resp.StatusCode, nil
 }
 
-func (q *QueryTraces) names() []string {
-	names := make([]string, 0, len(q.services))
-	for n := range q.services {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return names
-}
+func (q *QueryTraces) names() []string { return sortedNames(q.services) }
 
 // Tempo HTTP API responses (search, and trace by ID in OTLP JSON).
 

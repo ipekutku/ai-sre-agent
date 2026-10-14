@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// fakeTempo records the last request and replies with a fixed status and body.
-type fakeTempo struct {
+// fakeBackend (Tempo or Loki) records the last request and replies with a fixed status and body.
+type fakeBackend struct {
 	status int
 	body   string
 	delay  time.Duration
@@ -21,7 +21,7 @@ type fakeTempo struct {
 	calls  int
 }
 
-func (f *fakeTempo) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (f *fakeBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.calls++
 	f.path, f.query = r.URL.Path, r.URL.Query()
 	if f.delay > 0 {
@@ -35,7 +35,7 @@ func (f *fakeTempo) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(f.body))
 }
 
-func newQueryTraces(t *testing.T, fake *fakeTempo) *QueryTraces {
+func newQueryTraces(t *testing.T, fake *fakeBackend) *QueryTraces {
 	t.Helper()
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
@@ -74,7 +74,7 @@ const searchBody = `{"traces":[
 ],"metrics":{"inspectedBytes":"22696"}}`
 
 func TestQueryTracesSearch(t *testing.T) {
-	fake := &fakeTempo{status: 200, body: searchBody}
+	fake := &fakeBackend{status: 200, body: searchBody}
 	q := newQueryTraces(t, fake)
 
 	out, err := callQT(t, q, `{"service":"inventory-api","min_duration_ms":200,"status":"ok","lookback_minutes":5,"limit":3}`)
@@ -138,7 +138,7 @@ func TestQueryTracesSearchDefaultsAndFilters(t *testing.T) {
 			`{ resource.service.name = "checkout-api" && status = error } | select(name, status, span.http.response.status_code)`, "20", "1790960400"},
 	}
 	for _, tt := range tests {
-		fake := &fakeTempo{status: 200, body: `{"traces":[]}`}
+		fake := &fakeBackend{status: 200, body: `{"traces":[]}`}
 		q := newQueryTraces(t, fake)
 		out, err := callQT(t, q, tt.input)
 		if err != nil {
@@ -187,7 +187,7 @@ const traceBody = `{"trace":{"resourceSpans":[
 ]},"metrics":{}}`
 
 func TestQueryTracesGet(t *testing.T) {
-	fake := &fakeTempo{status: 200, body: traceBody}
+	fake := &fakeBackend{status: 200, body: traceBody}
 	q := newQueryTraces(t, fake)
 
 	out, err := callQT(t, q, `{"trace_id":"12135fe42c2d085f0a74cf69ed417e7e"}`)
@@ -233,7 +233,7 @@ func TestQueryTracesGetTruncates(t *testing.T) {
 	}
 	body := `{"trace":{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"checkout-api"}}]},
 		"scopeSpans":[{"spans":[` + strings.Join(spans, ",") + `]}]}]}}`
-	q := newQueryTraces(t, &fakeTempo{status: 200, body: body})
+	q := newQueryTraces(t, &fakeBackend{status: 200, body: body})
 
 	out, err := callQT(t, q, `{"trace_id":"12135fe42c2d085f0a74cf69ed417e7e"}`)
 	if err != nil {
@@ -248,7 +248,7 @@ func TestQueryTracesGetTruncates(t *testing.T) {
 func TestQueryTracesGetNotFound(t *testing.T) {
 	onlyAgent := `{"trace":{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"ai-sre-agent"}}]},
 		"scopeSpans":[{"spans":[{"spanId":"AAAAAAAAAAE=","name":"investigation","startTimeUnixNano":"1","endTimeUnixNano":"2"}]}]}]}}`
-	for name, fake := range map[string]*fakeTempo{
+	for name, fake := range map[string]*fakeBackend{
 		"empty trace":      {status: 200, body: `{"trace":{},"metrics":{}}`},
 		"404":              {status: 404, body: `trace not found`},
 		"only agent spans": {status: 200, body: onlyAgent},
@@ -286,7 +286,7 @@ func TestQueryTracesInvalidInput(t *testing.T) {
 		`[]`,
 	}
 	for _, in := range inputs {
-		fake := &fakeTempo{status: 200, body: `{"traces":[]}`}
+		fake := &fakeBackend{status: 200, body: `{"traces":[]}`}
 		q := newQueryTraces(t, fake)
 		_, err := callQT(t, q, in)
 		assertToolError(t, err, ErrInvalidInput)
@@ -299,12 +299,12 @@ func TestQueryTracesInvalidInput(t *testing.T) {
 func TestQueryTracesTempoErrors(t *testing.T) {
 	tests := []struct {
 		name string
-		fake *fakeTempo
+		fake *fakeBackend
 		want ErrorCode
 	}{
-		{"server error", &fakeTempo{status: 500, body: "internal error"}, ErrExecutionFailed},
-		{"bad request", &fakeTempo{status: 400, body: "invalid TraceQL query"}, ErrExecutionFailed},
-		{"too large", &fakeTempo{status: 200, body: `{"traces":[],"pad":"` + strings.Repeat("x", maxTempoResponseBytes) + `"}`}, ErrOutputTooLarge},
+		{"server error", &fakeBackend{status: 500, body: "internal error"}, ErrExecutionFailed},
+		{"bad request", &fakeBackend{status: 400, body: "invalid TraceQL query"}, ErrExecutionFailed},
+		{"too large", &fakeBackend{status: 200, body: `{"traces":[],"pad":"` + strings.Repeat("x", maxTempoResponseBytes) + `"}`}, ErrOutputTooLarge},
 	}
 	for _, tt := range tests {
 		q := newQueryTraces(t, tt.fake)
@@ -313,14 +313,14 @@ func TestQueryTracesTempoErrors(t *testing.T) {
 	}
 
 	// A non-JSON body is a plain error; the registry reports it as execution_failed.
-	q := newQueryTraces(t, &fakeTempo{status: 200, body: "<html>"})
+	q := newQueryTraces(t, &fakeBackend{status: 200, body: "<html>"})
 	if _, err := callQT(t, q, `{"service":"checkout-api"}`); err == nil {
 		t.Error("expected an error for a non-JSON response")
 	}
 }
 
 func TestQueryTracesTimeout(t *testing.T) {
-	q := newQueryTraces(t, &fakeTempo{status: 200, body: `{"traces":[]}`, delay: time.Second})
+	q := newQueryTraces(t, &fakeBackend{status: 200, body: `{"traces":[]}`, delay: time.Second})
 	r := newRegistry(t, Options{CallTimeout: 50 * time.Millisecond}, q)
 	res := r.Call(context.Background(), "query_traces", json.RawMessage(`{"service":"checkout-api"}`))
 	if res.Err == nil || res.Err.Code != ErrTimeout {
@@ -329,7 +329,7 @@ func TestQueryTracesTimeout(t *testing.T) {
 }
 
 func TestQueryTracesSchemaListsCatalog(t *testing.T) {
-	q := newQueryTraces(t, &fakeTempo{})
+	q := newQueryTraces(t, &fakeBackend{})
 	var schema struct {
 		Properties struct {
 			Service struct {
