@@ -6,14 +6,13 @@
 //	INVENTORY_URL      base URL of inventory-api (default "http://localhost:8081")
 //	INVENTORY_TIMEOUT  timeout per inventory-api call, Go duration (default "2s")
 //
-// Tracing is enabled by the standard OTEL_EXPORTER_OTLP_ENDPOINT variable
-// (see internal/telemetry).
+// Logs are written to stdout as JSON. Trace and log export are enabled by the
+// standard OTEL_EXPORTER_OTLP_*ENDPOINT variables (see internal/telemetry).
 package main
 
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -34,41 +33,46 @@ type config struct {
 	inventoryTimeout time.Duration
 }
 
+const serviceName = "checkout-api"
+
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "checkout-api")
+	// localLogger never exports, so it can report telemetry failures.
+	localLogger := telemetry.NewLogger(os.Stdout, serviceName, nil)
 
 	cfg, err := loadConfig(os.Getenv)
 	if err != nil {
-		logger.Error("invalid configuration", "error", err)
+		localLogger.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	tp, shutdownTracing, err := telemetry.Setup(ctx, logger, "checkout-api", os.Getenv)
+	providers, shutdownTelemetry, err := telemetry.Setup(ctx, localLogger, serviceName, os.Getenv)
 	if err != nil {
-		logger.Error("telemetry setup failed", "error", err)
+		localLogger.Error("telemetry setup failed", "error", err)
 		os.Exit(1)
 	}
+	logger := telemetry.NewLogger(os.Stdout, serviceName, providers.Logger)
 
 	reg := httpmetrics.NewRegistry()
 	inv := checkout.NewInventoryClient(cfg.inventoryURL, &http.Client{
 		Timeout: cfg.inventoryTimeout,
-		Transport: telemetry.Transport(tp, "inventory-api",
+		Transport: telemetry.Transport(providers.Tracer, "inventory-api",
 			httpmetrics.NewClient(reg).Transport("inventory-api", nil)),
 	})
-	handler := telemetry.Handler(tp, httpmetrics.Handler(reg, checkout.NewHandler(logger, inv)), "/metrics")
+	handler := telemetry.Handler(providers.Tracer, logger,
+		httpmetrics.Handler(reg, checkout.NewHandler(logger, inv)), "/metrics")
 
 	logger.Info("starting", "version", version.Version,
 		"inventory_url", cfg.inventoryURL, "inventory_timeout", cfg.inventoryTimeout.String(),
-		"tracing", telemetry.Enabled(os.Getenv))
+		"trace_export", telemetry.TracesEnabled(os.Getenv), "log_export", telemetry.LogsEnabled(os.Getenv))
 	err = httpserver.Run(ctx, logger, cfg.addr, handler)
-	if serr := telemetry.Shutdown(shutdownTracing); serr != nil {
-		logger.Warn("telemetry shutdown failed", "error", serr)
+	if serr := telemetry.Shutdown(shutdownTelemetry); serr != nil {
+		localLogger.Warn("telemetry shutdown failed", "error", serr)
 	}
 	if err != nil {
-		logger.Error("server failed", "error", err)
+		localLogger.Error("server failed", "error", err)
 		os.Exit(1)
 	}
 }

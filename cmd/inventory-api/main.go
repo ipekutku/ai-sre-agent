@@ -9,15 +9,17 @@
 //	ADMIN_ADDR    fault-injection admin listen address (default "127.0.0.1:9081")
 //	BASE_LATENCY  normal response delay for GET /inventory, Go duration (default "20ms")
 //
-// Tracing of the service API is enabled by the standard
-// OTEL_EXPORTER_OTLP_ENDPOINT variable (see internal/telemetry). The admin
-// API is never traced.
+// Logs are written to stdout as JSON. Trace and log export of the service API
+// are enabled by the standard OTEL_EXPORTER_OTLP_*ENDPOINT variables (see
+// internal/telemetry). The admin API is never traced and its logs are never
+// exported.
 package main
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -25,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ipekutku/ai-sre-agent/internal/httpmetrics"
@@ -40,44 +43,56 @@ type config struct {
 	baseLatency time.Duration
 }
 
+const serviceName = "inventory-api"
+
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "inventory-api")
+	// localLogger never exports, so it can report telemetry failures.
+	localLogger := telemetry.NewLogger(os.Stdout, serviceName, nil)
 
 	cfg, err := loadConfig(os.Getenv)
 	if err != nil {
-		logger.Error("invalid configuration", "error", err)
+		localLogger.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	tp, shutdownTracing, err := telemetry.Setup(ctx, logger, "inventory-api", os.Getenv)
+	providers, shutdownTelemetry, err := telemetry.Setup(ctx, localLogger, serviceName, os.Getenv)
 	if err != nil {
-		logger.Error("telemetry setup failed", "error", err)
+		localLogger.Error("telemetry setup failed", "error", err)
 		os.Exit(1)
 	}
 
+	logger, adminLogger := loggers(os.Stdout, providers.Logger)
 	logger.Info("starting", "version", version.Version, "base_latency", cfg.baseLatency.String(),
-		"tracing", telemetry.Enabled(os.Getenv))
-	err = run(ctx, logger, cfg, tp)
-	if serr := telemetry.Shutdown(shutdownTracing); serr != nil {
-		logger.Warn("telemetry shutdown failed", "error", serr)
+		"trace_export", telemetry.TracesEnabled(os.Getenv), "log_export", telemetry.LogsEnabled(os.Getenv))
+	err = run(ctx, logger, adminLogger, cfg, providers.Tracer)
+	if serr := telemetry.Shutdown(shutdownTelemetry); serr != nil {
+		localLogger.Warn("telemetry shutdown failed", "error", serr)
 	}
 	if err != nil {
-		logger.Error("server failed", "error", err)
+		localLogger.Error("server failed", "error", err)
 		os.Exit(1)
 	}
 }
 
+// loggers returns the service logger, which also exports through lp, and the
+// fault-admin logger, which writes to w only. Fault changes are ground truth,
+// so they must never reach the log backend the agent can query (ADR 0001).
+func loggers(w io.Writer, lp log.LoggerProvider) (service, admin *slog.Logger) {
+	service = telemetry.NewLogger(w, serviceName, lp)
+	admin = telemetry.NewLogger(w, serviceName, nil).With("component", "fault-admin")
+	return service, admin
+}
+
 // run serves the service and admin APIs until ctx is cancelled or either
 // server fails, in which case both are shut down.
-func run(ctx context.Context, logger *slog.Logger, cfg config, tp trace.TracerProvider) error {
+func run(ctx context.Context, logger, adminLogger *slog.Logger, cfg config, tp trace.TracerProvider) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	service, admin := handlers(logger, cfg, tp)
-	adminLogger := logger.With("component", "fault-admin")
+	service, admin := handlers(logger, adminLogger, cfg, tp)
 
 	errc := make(chan error, 2)
 	go func() { errc <- httpserver.Run(ctx, logger, cfg.addr, service) }()
@@ -91,10 +106,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, tp trace.TracerPr
 // handlers returns the service API and the fault-injection admin API. The
 // admin API is neither instrumented nor traced, so fault state never appears
 // in metrics or traces (ADR 0001).
-func handlers(logger *slog.Logger, cfg config, tp trace.TracerProvider) (service, admin http.Handler) {
+func handlers(logger, adminLogger *slog.Logger, cfg config, tp trace.TracerProvider) (service, admin http.Handler) {
 	latency := inventory.NewLatency(cfg.baseLatency)
-	service = telemetry.Handler(tp, httpmetrics.Handler(httpmetrics.NewRegistry(), inventory.NewHandler(latency)), "/metrics")
-	admin = inventory.NewAdminHandler(logger.With("component", "fault-admin"), latency)
+	service = telemetry.Handler(tp, logger,
+		httpmetrics.Handler(httpmetrics.NewRegistry(), inventory.NewHandler(latency)), "/metrics")
+	admin = inventory.NewAdminHandler(adminLogger, latency)
 	return service, admin
 }
 

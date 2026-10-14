@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -9,8 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -60,7 +65,7 @@ func TestAdminAPIIsNotTraced(t *testing.T) {
 	rec := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	service, admin := handlers(logger, config{baseLatency: 0}, tp)
+	service, admin := handlers(logger, logger, config{baseLatency: 0}, tp)
 
 	for _, req := range []*http.Request{
 		httptest.NewRequest(http.MethodPut, "/fault", strings.NewReader(`{"latency_ms": 5}`)),
@@ -88,3 +93,58 @@ func TestAdminAPIIsNotTraced(t *testing.T) {
 		}
 	}
 }
+
+// Fault-admin logs are ground truth: they are written locally for auditing
+// but must never be exported to the log backend the agent can query.
+func TestAdminLogsAreNotExported(t *testing.T) {
+	exp := &logRecorder{}
+	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exp)))
+	var local bytes.Buffer
+	serviceLogger, adminLogger := loggers(&local, lp)
+	service, admin := handlers(serviceLogger, adminLogger, config{baseLatency: 0}, tracenoop.NewTracerProvider())
+
+	for _, req := range []*http.Request{
+		httptest.NewRequest(http.MethodPut, "/fault", strings.NewReader(`{"latency_ms": 5}`)),
+		httptest.NewRequest(http.MethodDelete, "/fault", nil),
+	} {
+		w := httptest.NewRecorder()
+		admin.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s /fault: status %d", req.Method, w.Code)
+		}
+	}
+	service.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/inventory", nil))
+
+	if !strings.Contains(local.String(), `"component":"fault-admin"`) {
+		t.Errorf("fault changes were not logged locally:\n%s", local.String())
+	}
+	records := exp.records
+	if len(records) == 0 {
+		t.Fatal("service request exported no records; the exporter is not wired")
+	}
+	for _, r := range records {
+		text := strings.ToLower(r.Body().AsString())
+		r.WalkAttributes(func(kv attribute.KeyValue) bool {
+			text += " " + strings.ToLower(string(kv.Key)+"="+kv.Value.Emit())
+			return true
+		})
+		if strings.Contains(text, "fault") {
+			t.Errorf("exported record mentions the fault: %s", text)
+		}
+	}
+}
+
+// logRecorder is an in-memory log exporter, used with a SimpleProcessor.
+type logRecorder struct {
+	records []sdklog.Record
+}
+
+func (e *logRecorder) Export(_ context.Context, records []sdklog.Record) error {
+	for _, r := range records {
+		e.records = append(e.records, r.Clone())
+	}
+	return nil
+}
+
+func (e *logRecorder) Shutdown(context.Context) error   { return nil }
+func (e *logRecorder) ForceFlush(context.Context) error { return nil }

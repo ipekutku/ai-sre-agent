@@ -14,7 +14,8 @@ the agent never sees.
 **Milestone 1: Metrics-Based Incident Investigator** (complete, `v0.1.0`).
 
 **Milestone 2: Multi-Signal Investigation** (in progress). Done so far: OpenTelemetry tracing of
-both services, stored in Grafana Tempo (see [Traces](#traces)).
+both services, stored in Grafana Tempo (see [Traces](#traces)), and structured, trace-correlated
+logs, stored in Grafana Loki (see [Logs](#logs)).
 
 Done:
 
@@ -107,14 +108,17 @@ Configuration is via environment variables:
 | `INVENTORY_TIMEOUT` | checkout-api | `2s` |
 | `ADMIN_ADDR` | inventory-api | `127.0.0.1:9081` |
 | `BASE_LATENCY` | inventory-api | `20ms` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | both | unset (tracing off) |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | both | unset (spans not exported) |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | both | unset (logs on stdout only) |
+
+`OTEL_EXPORTER_OTLP_ENDPOINT` enables both signals at one base URL (e.g. a Collector).
 
 ## Local environment
 
 Requires Docker with the Compose plugin.
 
 ```bash
-make up     # build and start checkout-api, inventory-api, Prometheus, and Tempo
+make up     # build and start checkout-api, inventory-api, Prometheus, Tempo, and Loki
 make down   # stop and remove the containers
 ```
 
@@ -124,6 +128,7 @@ make down   # stop and remove the containers
 | inventory-api | http://localhost:8081/inventory |
 | Prometheus | http://localhost:9090 |
 | Tempo (trace query API) | http://localhost:3200 |
+| Loki (log query API) | http://localhost:3100 |
 | inventory-api fault admin | http://localhost:9081/fault |
 
 Ports are bound to `127.0.0.1` only. Prometheus scrapes every 5s
@@ -132,8 +137,8 @@ Ports are bound to `127.0.0.1` only. Prometheus scrapes every 5s
 ## Fault injection
 
 `inventory-api` serves a fault-injection admin API on a separate port (`ADMIN_ADDR`). It is not
-instrumented or traced, so fault state never appears in metrics or traces. See
-[ADR 0001](docs/adr/0001-fault-injection-admin-api.md) for why.
+instrumented or traced, and its logs go to stdout only, so fault state never appears in metrics,
+traces, or Loki. See [ADR 0001](docs/adr/0001-fault-injection-admin-api.md) for why.
 
 ```bash
 make fault-inventory-latency                        # inventory-api now responds in 800 ms
@@ -201,7 +206,7 @@ histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_
 ## Traces
 
 Both services are traced with OpenTelemetry ([`internal/telemetry`](internal/telemetry)) when
-`OTEL_EXPORTER_OTLP_ENDPOINT` is set, as it is in Compose. Spans are pushed over OTLP/HTTP to
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set, as it is in Compose. Spans are pushed over OTLP/HTTP to
 [Tempo](https://grafana.com/oss/tempo/) ([`deploy/tempo/tempo.yaml`](deploy/tempo/tempo.yaml)),
 and W3C trace context is propagated from checkout-api to inventory-api, so one checkout request is
 one trace:
@@ -226,6 +231,39 @@ curl localhost:3200/api/v2/traces/<trace-id>
 ```
 
 The agent cannot query traces yet; a `query_traces` tool is planned for Milestone 2.
+
+## Logs
+
+Both services log JSON lines to stdout ([`internal/telemetry`](internal/telemetry)). When
+`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set, as it is in Compose, every record is also pushed over
+OTLP/HTTP to [Loki](https://grafana.com/oss/loki/) ([`deploy/loki/loki.yaml`](deploy/loki/loki.yaml)).
+
+Each request gets a request ID: the caller's `X-Request-ID` if valid, otherwise a new one. It is
+returned in the response and forwarded from checkout-api to inventory-api. Every request is
+logged once, and every record logged during a request carries the request and trace IDs:
+
+```json
+{"time":"...","level":"WARN","msg":"inventory lookup failed","service":"checkout-api","sku":"abc","error":"call inventory-api: ... context deadline exceeded ...","request_id":"3f2a...","trace_id":"9288...","span_id":"aca5..."}
+{"time":"...","level":"ERROR","msg":"request","service":"checkout-api","method":"GET","route":"/checkout","status":502,"duration_ms":2001.9,"request_id":"3f2a...","trace_id":"9288...","span_id":"aca5..."}
+```
+
+5xx responses are logged at error level. `/metrics` scrapes are not logged, and the fault admin
+API's logs are never exported. In Loki, `service_name` is the stream label, and `request_id`,
+`trace_id`, `severity_text`, and the other fields are structured metadata:
+
+```bash
+# checkout-api errors from the last 10 minutes
+curl -G localhost:3100/loki/api/v1/query_range \
+  --data-urlencode 'query={service_name="checkout-api"} | severity_text="ERROR"' \
+  --data-urlencode "start=$(( $(date +%s) - 600 ))000000000"
+
+# every log line of one request, across services
+curl -G localhost:3100/loki/api/v1/query_range \
+  --data-urlencode 'query={service_name=~".+"} | trace_id="<trace-id>"' \
+  --data-urlencode "start=$(( $(date +%s) - 600 ))000000000"
+```
+
+The agent cannot query logs yet; a `query_logs` tool is planned for Milestone 2.
 
 ## Requirements
 

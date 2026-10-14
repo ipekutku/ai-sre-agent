@@ -26,6 +26,7 @@ direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
       +---------------------+
 
   checkout-api, inventory-api --OTLP/HTTP spans--> Tempo :3200 (not yet queried by the agent)
+  checkout-api, inventory-api --OTLP/HTTP logs---> Loki  :3100 (not yet queried by the agent)
 ```
 
 ## Components
@@ -35,8 +36,8 @@ direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
 | checkout-api | `cmd/checkout-api`, `internal/services/checkout` | `GET /checkout`; calls inventory-api |
 | inventory-api | `cmd/inventory-api`, `internal/services/inventory` | `GET /inventory` with a fixed baseline delay; fault admin API on a separate port |
 | Metrics | `internal/httpmetrics` | server and client (dependency) latency histograms, `/metrics` |
-| Tracing | `internal/telemetry` | OpenTelemetry setup (OTLP/HTTP export, no-op without an endpoint); server and client spans with W3C propagation |
-| Environment | `deploy/` | Docker Compose: both services, Prometheus (5 s scrape), and Tempo; ports on 127.0.0.1 |
+| Telemetry | `internal/telemetry` | OpenTelemetry setup (OTLP/HTTP export of spans and logs, each a no-op without an endpoint); server and client spans with W3C propagation; request IDs; access logs; the JSON logger with trace correlation |
+| Environment | `deploy/` | Docker Compose: both services, Prometheus (5 s scrape), Tempo, and Loki; ports on 127.0.0.1 |
 | Scenarios | `scenarios/<id>/`, `internal/scenarios` | incident, fault, alert trigger; environment control for the runner |
 | Tools | `internal/tools` | `query_metrics`, `inspect_service`, and the registry (validation, timeouts, size limits, logging) |
 | LLM boundary | `internal/llm`, `internal/llm/anthropic` | provider-independent `Client`; Claude implementation |
@@ -68,7 +69,8 @@ The agent must infer the cause from observations only.
 - `TestAgentCannotImportGroundTruth` fails if `internal/agent`, `internal/tools`, or
   `internal/llm` depend on `internal/scenarios` or `internal/evaluation`.
 - The fault admin API is on a separate listener that is not instrumented or traced and is not in the
-  agent's service catalog ([ADR 0001](adr/0001-fault-injection-admin-api.md)).
+  agent's service catalog ([ADR 0001](adr/0001-fault-injection-admin-api.md)). Its logger writes
+  to stdout only, so fault changes never reach Loki ([ADR 0004](adr/0004-log-backend-and-export.md)).
 - The system prompt and incident text are tested to contain no scenario details.
 
 ## Evaluation
@@ -95,5 +97,11 @@ token usage, and estimated cost.
   traces of every request (one trace per checkout request, exported to Tempo; see
   [ADR 0003](adr/0003-tracing-backend-and-export.md)). Spans carry standard HTTP attributes
   only, never fault state.
+- Service logs: JSON on stdout and exported to Loki
+  ([ADR 0004](adr/0004-log-backend-and-export.md)). Each request gets a request ID (the
+  caller's valid `X-Request-ID`, or a new one) that checkout-api forwards to inventory-api, and
+  one access-log line (`method`, `route`, `status`, `duration_ms`). Records logged during a
+  request carry `request_id`, `trace_id`, and `span_id`. Telemetry export failures are logged
+  to stdout only.
 - Agent: structured logs per LLM request (model, stop reason, latency, tokens) and per tool call
   (tool, input, duration, outcome), plus an investigation summary. Agent tracing is Milestone 2.

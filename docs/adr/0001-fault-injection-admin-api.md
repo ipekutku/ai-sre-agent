@@ -47,3 +47,9 @@ Delays are fixed (no jitter), so a given configuration always produces the same 
   only. This is acceptable for a local demo environment; it must not be exposed elsewhere.
 - **One fault type for now.** The API only supports latency. Other fault types (errors,
   timeouts) will extend this API when the scenarios that need them are added.
+
+## Notes
+
+- 2026-10-14: Service logs are now exported to Loki (ADR 0004). The fault-admin logger is a
+  separate logger that writes to stdout only, so fault changes are still logged for auditing
+  but never reach the log backend. A test in `cmd/inventory-api` checks this.
