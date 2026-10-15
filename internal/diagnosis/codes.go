@@ -11,7 +11,7 @@ type Code struct {
 // answer is one of several plausible codes, each distinguishable only with
 // evidence. See docs/adr/0002-closed-root-cause-taxonomy.md.
 var Codes = []Code{
-	{"INVENTORY_DOWNSTREAM_LATENCY", "inventory-api itself responds slowly, slowing its callers"},
+	{"INVENTORY_DOWNSTREAM_LATENCY", "inventory-api itself responds slowly, slowing or timing out its callers"},
 	{"CHECKOUT_INTERNAL_LATENCY", "checkout-api is slow while its dependencies respond normally"},
 	{"CHECKOUT_RESOURCE_SATURATION", "checkout-api is short of CPU or memory"},
 	{"CHECKOUT_INVENTORY_NETWORK_LATENCY", "calls from checkout-api to inventory-api are slow in transit while inventory-api serves them quickly"},
