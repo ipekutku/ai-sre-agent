@@ -57,6 +57,8 @@ The repository has a clean development workflow and CI passes from a fresh clone
 
 # Milestone 1 — Metrics-Based Incident Investigator
 
+Status: complete, released as `v0.1.0`.
+
 ## Goal
 
 Build the smallest complete version of the project.
@@ -426,6 +428,8 @@ Do not add Kubernetes, traces, more services, or many additional scenarios befor
 ---
 
 # Milestone 2 — Multi-Signal Investigation
+
+Status: complete, released as `v0.2.0`.
 
 ## Goal
 

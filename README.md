@@ -13,15 +13,18 @@ the agent never sees.
 
 **Milestone 1: Metrics-Based Incident Investigator** (complete, `v0.1.0`).
 
-**Milestone 2: Multi-Signal Investigation** (in progress). Done so far: OpenTelemetry tracing of
-both services, stored in Grafana Tempo (see [Traces](#traces)), and structured, trace-correlated
-logs, stored in Grafana Loki (see [Logs](#logs)). The agent can query traces with `query_traces`
-and logs with `query_logs`, and each investigation is itself traced (see
-[Agent traces](#agent-traces)).
+**Milestone 2: Multi-Signal Investigation** (complete, `v0.2.0`). The agent investigates with
+metrics, traces, logs, and service metadata, each investigation is itself traced, and three
+incident classes run through the same evaluation.
+
+**Next: Milestone 3: Evaluation Platform** (repeatable runs, a larger scenario catalog, evidence
+evaluation, and reports).
 
 Done:
 
-- `checkout-api` and `inventory-api` run under Docker Compose, instrumented with Prometheus metrics
+- `checkout-api` and `inventory-api` run under Docker Compose, with Prometheus metrics,
+  OpenTelemetry traces stored in Grafana Tempo ([Traces](#traces)), and structured,
+  trace-correlated logs stored in Grafana Loki ([Logs](#logs))
 - deterministic latency and HTTP-error fault injection in `inventory-api`
 - the `inventory-latency`, `inventory-errors`, and `inventory-timeout` scenarios, their ground
   truth, the diagnosis schema, and the evaluator
@@ -29,6 +32,7 @@ Done:
 - a provider-independent LLM client interface, implemented for Claude (default `claude-sonnet-5-5`)
 - the investigation loop (`internal/agent`): tool dispatch, budgets, timeout, and a validated
   diagnosis chosen from a fixed list of root-cause codes ([ADR 0002](docs/adr/0002-closed-root-cause-taxonomy.md))
+- OpenTelemetry traces of each investigation, viewable in Grafana ([Agent traces](#agent-traces))
 - `make eval`: one scenario end to end, from fault injection to PASS/FAIL; `make eval-all` runs
   them all
 

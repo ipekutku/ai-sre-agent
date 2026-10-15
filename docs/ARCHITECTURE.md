@@ -1,8 +1,7 @@
 # Architecture
 
-This document describes the system as implemented (Milestone 1, plus the parts of Milestone 2
-merged so far). For goals and long-term
-direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
+This document describes the system as implemented (Milestones 1 and 2, `v0.2.0`). For goals and
+long-term direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
 
 ## Overview
 
@@ -81,10 +80,10 @@ The agent must infer the cause from observations only.
   uninstrumented HTTP client and create no spans, and neither the runner nor the tools propagate
   trace context to the services. Agent spans carry no prompts, model output, tool payloads, or
   diagnosis text, and nothing from the evaluation (expected code, PASS/FAIL).
-- Grafana is for people. No tool can reach it.
 - `query_logs` builds LogQL the same way, returns only entries from catalog services, and drops
   any entry marked `component=fault-admin`, both in the query and on the response, as a second
   line of defence behind the stdout-only admin logger.
+- Grafana is for people. No tool can reach it.
 - The system prompt and every scenario's incident text are tested to contain no scenario
   details: no faulty service, no fault wording, and not the scenario's expected code.
 
