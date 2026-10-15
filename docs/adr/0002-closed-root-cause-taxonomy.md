@@ -39,3 +39,13 @@ versus `INVENTORY_DOWNSTREAM_LATENCY` differ only in inventory-api's own server 
 - New scenarios whose cause is not in the list require adding a code, which changes what the agent
   sees for every scenario. Re-run all scenarios after such a change.
 - Revisit in Milestone 3, when evidence evaluation may make free-form or hierarchical codes viable.
+
+## Notes
+
+- 2026-10-15: The `inventory-timeout` scenario (inventory-api slower than checkout-api's 2 s
+  timeout, so checkout-api returns 502) reuses `INVENTORY_DOWNSTREAM_LATENCY` instead of adding
+  a code: the cause is inventory-api's latency, and the errors are how its callers experience
+  it. The code's description was widened from "slowing its callers" to "slowing or timing out
+  its callers". `INVENTORY_ERRORS` and `INVENTORY_UNAVAILABLE` remain the wrong answers, and
+  ruling them out needs evidence: inventory-api is healthy and answers late rather than with
+  errors. The description is part of every scenario's prompt, so all scenarios were re-run.

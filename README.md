@@ -23,8 +23,8 @@ Done:
 
 - `checkout-api` and `inventory-api` run under Docker Compose, instrumented with Prometheus metrics
 - deterministic latency and HTTP-error fault injection in `inventory-api`
-- the `inventory-latency` and `inventory-errors` scenarios, their ground truth, the diagnosis
-  schema, and the evaluator
+- the `inventory-latency`, `inventory-errors`, and `inventory-timeout` scenarios, their ground
+  truth, the diagnosis schema, and the evaluator
 - the `query_metrics`, `query_traces`, `query_logs`, and `inspect_service` investigation tools
 - a provider-independent LLM client interface, implemented for Claude (default `claude-sonnet-5-5`)
 - the investigation loop (`internal/agent`): tool dispatch, budgets, timeout, and a validated
@@ -37,7 +37,13 @@ real API. The agent identifies `INVENTORY_DOWNSTREAM_LATENCY` by combining metri
 used `query_traces` in 10 of the 11 runs, at about $0.02–$0.035 per run. Since `query_logs` was
 added, it has used logs in 1 of 3 runs, to confirm there were no errors. The `inventory-errors`
 scenario passed 4 of 4 runs, at about $0.026–$0.034 per run. The agent queried error logs every
-time and linked each checkout-api 502 to an inventory-api 500 through the trace ID.
+time and linked each checkout-api 502 to an inventory-api 500 through the trace ID. The
+`inventory-timeout` scenario passed 4 of 4 runs, at about $0.042–$0.053 per run. The agent
+used logs, metrics, and traces every time and told the timeouts apart from errors because
+inventory-api answered `499` after about 2 s instead of answering `500`. Because scenarios share one
+environment, a diagnosis can still cite an earlier run's fault: one `inventory-latency` run
+picked the right code but quoted the 2 s timeouts from the `inventory-timeout` run before it.
+Resetting the environment between runs is planned for Milestone 3.
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan.
 
 ## Running the demo
@@ -105,7 +111,7 @@ timeline doesn't matter.
 
 `make eval-all` runs every scenario once, with the same cooldown between scenarios, then lists
 PASS or FAIL for each. It exits non-zero if any scenario failed, and stops at the first setup
-error. Two scenarios take about 10 minutes.
+error. Three scenarios take about 15 minutes.
 
 ## Demo services
 
@@ -176,6 +182,7 @@ traces, or Loki. See [ADR 0001](docs/adr/0001-fault-injection-admin-api.md) for 
 ```bash
 make fault-inventory-latency                        # inventory-api now responds in 800 ms
 make fault-inventory-latency FAULT_LATENCY_MS=1500  # custom latency (max 10000)
+make fault-inventory-latency FAULT_LATENCY_MS=3000  # beyond checkout-api's 2 s timeout: 502s
 make fault-inventory-errors                         # 50% of inventory requests return 500
 make fault-inventory-errors FAULT_ERROR_PERCENT=20  # custom error percentage (1-100)
 make fault-clear                                    # back to the 20 ms baseline, no errors
@@ -202,6 +209,11 @@ Each incident scenario lives in [`scenarios/<id>/`](scenarios/):
 |---|---|---|---|
 | `inventory-latency` | `HighCheckoutLatency` on checkout-api | inventory-api responds in 800 ms | checkout-api p95 > 500 ms |
 | `inventory-errors` | `HighCheckoutErrorRate` on checkout-api | 50% of inventory-api requests return 500 | checkout-api 5xx ratio > 20% |
+| `inventory-timeout` | `HighCheckoutErrorRate` on checkout-api | inventory-api responds in 3 s, past checkout-api's 2 s timeout | checkout-api 5xx ratio > 20% |
+
+`inventory-errors` and `inventory-timeout` raise the same alert with the same text, and in both
+checkout-api answers with `502`. Only the evidence tells them apart: inventory-api answering
+`500` quickly, or being healthy but answering too late for checkout-api to wait.
 
 The investigation agent receives only the scenario's `incident` (alert, service, severity,
 description), which describes the symptom and never the cause. The evaluator passes a diagnosis

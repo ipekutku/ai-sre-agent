@@ -1,0 +1,24 @@
+# Read by the scenario runner. Only `incident` is given to the investigation agent.
+id: inventory-timeout
+description: >-
+  inventory-api responds in 3 s, longer than checkout-api's 2 s timeout for
+  inventory calls, so checkout-api gives up and returns 502.
+
+incident:
+  incident_id: inc-003
+  alert: HighCheckoutErrorRate
+  service: checkout-api
+  severity: critical
+  description: 5xx response ratio exceeded threshold
+
+fault:
+  service: inventory-api
+  type: latency
+  latency_ms: 3000
+
+# The incident is raised once this alert condition holds (more than 20% of checkout-api
+# requests answered with 5xx).
+trigger:
+  query: sum(rate(http_server_request_duration_seconds_count{job="checkout-api", route="/checkout", status=~"5.."}[30s])) / sum(rate(http_server_request_duration_seconds_count{job="checkout-api", route="/checkout"}[30s]))
+  above: 0.2
+  timeout_seconds: 120

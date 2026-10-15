@@ -312,7 +312,7 @@ func TestInvestigateRejectsInvalidIncident(t *testing.T) {
 
 // The prompt and tool schema must offer every code and stay scenario-neutral.
 func TestPromptIsScenarioNeutral(t *testing.T) {
-	for _, banned := range []string{"inc-001", "800", "fault", "injected", "ground truth", "ground-truth"} {
+	for _, banned := range []string{"inc-001", "800", "3000", "fault", "injected", "ground truth", "ground-truth"} {
 		if strings.Contains(strings.ToLower(systemPrompt), banned) {
 			t.Errorf("system prompt mentions %q", banned)
 		}
