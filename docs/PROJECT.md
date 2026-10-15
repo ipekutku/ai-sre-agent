@@ -697,6 +697,8 @@ Initial technology choices:
 | Agent runtime | Go |
 | Metrics | Prometheus |
 | Tracing | OpenTelemetry, Grafana Tempo |
+| Logs | Go `slog`, exported with OpenTelemetry to Grafana Loki |
+| Telemetry UI | Grafana (local, for people only; the agent has no access) |
 | Local environment | Docker Compose |
 | CI | GitHub Actions |
 | LLM | Provider behind internal interface |
@@ -745,7 +747,10 @@ ai-sre-agent/
 |
 ├── deploy/
 |   ├── docker-compose.yml
-|   └── prometheus/
+|   ├── grafana/
+|   ├── loki/
+|   ├── prometheus/
+|   └── tempo/
 |
 ├── docs/
 |   ├── PROJECT.md
