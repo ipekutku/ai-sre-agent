@@ -23,6 +23,8 @@ import (
 )
 
 // Client generates the next assistant message for a conversation.
+// On error, Response may contain attempt and latency metadata; its message
+// must not be treated as a successful generation.
 type Client interface {
 	Generate(ctx context.Context, req Request) (Response, error)
 }
@@ -114,6 +116,10 @@ type Response struct {
 	Model   string
 	Usage   Usage
 	Latency time.Duration
+	// Attempts counts provider request dispatches, including retries, for this
+	// generation only. It excludes preflight requests and is zero if validation
+	// fails before dispatch. It is populated on errors too.
+	Attempts int
 }
 
 // ToolUses returns the tool_use blocks in the response.

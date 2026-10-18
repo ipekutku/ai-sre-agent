@@ -269,7 +269,11 @@ func writeDetails(w io.Writer, r agent.Result, t scenarios.TrafficStats) {
 	fmt.Fprintf(w, "  models:          %v\n", s.Models)
 	fmt.Fprintf(w, "  duration:        %s\n", s.Duration.Round(100*time.Millisecond))
 	fmt.Fprintf(w, "  llm requests:    %d\n", s.LLMRequests)
+	fmt.Fprintf(w, "  llm retries:     %d\n", s.LLMRetries)
 	fmt.Fprintf(w, "  tool calls:      %d (%d failed)%s\n", s.ToolCalls, s.FailedToolCalls, toolBreakdown(s.ToolCallsByName))
+	fmt.Fprintf(w, "  duplicate calls: %d\n", s.DuplicateToolCalls)
+	fmt.Fprintf(w, "  invalid calls:   %d\n", s.InvalidToolCalls)
+	fmt.Fprintf(w, "  rejected diagnoses: %d\n", s.RejectedDiagnoses)
 	fmt.Fprintf(w, "  tokens:          %d in, %d out, %d cache read, %d cache write\n",
 		s.Usage.InputTokens, s.Usage.OutputTokens, s.Usage.CacheReadTokens, s.Usage.CacheWriteTokens)
 	fmt.Fprintf(w, "  estimated cost:  %s\n", cost)

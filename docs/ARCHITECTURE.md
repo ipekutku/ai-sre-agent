@@ -1,7 +1,8 @@
 # Architecture
 
-This document describes the system as implemented (Milestones 1 and 2, `v0.2.0`). For goals and
-long-term direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
+This document describes the system as implemented (Milestones 1 and 2, plus Milestone 3
+investigation recording and counters). For goals and long-term direction, see
+[PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
 
 ## Overview
 
@@ -43,7 +44,7 @@ long-term direction, see [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
 | Scenarios | `scenarios/<id>/`, `internal/scenarios` | incident, fault, alert trigger; environment control for the runner |
 | Tools | `internal/tools` | `query_metrics`, `query_traces`, `query_logs`, `inspect_service`, and the registry (validation, timeouts, size limits, logging, a span per call) |
 | LLM boundary | `internal/llm`, `internal/llm/anthropic` | provider-independent `Client`; Claude implementation |
-| Agent | `internal/agent` | investigation loop, budgets, `submit_diagnosis` validation, stats, investigation and LLM spans |
+| Agent | `internal/agent` | investigation loop, budgets, `submit_diagnosis` validation, stats, in-memory tool-call record, investigation and LLM spans |
 | Diagnosis | `internal/diagnosis` | diagnosis schema and the closed root-cause code list |
 | Evaluation | `internal/evaluation` | loads ground truth; compares diagnosis; report |
 | Runner | `cmd/scenario-runner` | orchestrates one scenario end to end (`make eval`; `make eval-all` runs it for every scenario); sets up the agent's tracer |
@@ -93,8 +94,33 @@ A diagnosis passes if it is valid (known root-cause code, at least one piece of 
 refers to the scenario's incident, and its code matches the ground truth exactly. Codes come
 from a fixed list ([ADR 0002](adr/0002-closed-root-cause-taxonomy.md)).
 
-The runner also reports investigation duration, LLM requests, tool calls (total, failed, and
-per tool), token usage, estimated cost, and the investigation's trace ID.
+The runner also reports investigation duration, LLM requests and retries, tool calls (total,
+failed, and per tool), duplicate and invalid calls, rejected diagnoses, token usage, estimated
+cost, and the investigation's trace ID. Counter definitions:
+
+- **Tool calls** count every dispatch through `Registry.Call`, including invalid arguments,
+  unknown names and execution failures. Diagnosis submissions and requests rejected before
+  dispatch by the tool-call budget are excluded.
+- **Invalid calls** count dispatches returning `invalid_input` or `unknown_tool`. They are a
+  narrow proxy for unnecessary calls, not a measure of all unnecessary investigation work.
+- **Duplicate calls** count each repetition of a dispatched tool name and canonical input
+  within one investigation. JSON object keys are sorted recursively, whitespace and string
+  escapes normalized, and array order retained. Numbers retain exact literals (no float
+  conversion); `1` and `1.0` count as different inputs. Malformed JSON uses exact bytes.
+  Repeated calls still execute: polling, fresh observations and recovery can be useful.
+- **Rejected diagnoses** count invalid `submit_diagnosis` requests, separately from tool calls.
+- **LLM requests** count `Generate` invocations. **LLM retries** sum `max(Attempts - 1, 0)` per
+  generation, including failed requests and cancellation during backoff. `Attempts` counts
+  Messages request middleware dispatches, excludes the model/credential preflight, and is zero
+  for local validation failures before dispatch. The SDK retry policy remains unchanged.
+
+`agent.Result.ToolCalls` holds an in-memory record of each registry dispatch: an increasing
+sequence number starting at 1, requested tool name, UTC start time, raw JSON input, capped
+registry output, error code and registry duration. Payloads are copied so later mutation cannot
+rewrite the record; failed calls have no output. Records and counters survive budget exhaustion,
+cancellation and investigation errors. The record is returned to the caller for future evidence
+evaluation; it is not added to the conversation, printed, persisted, logged or exported in spans.
+It contains observations only and has no access to ground truth.
 
 `make eval-all` runs every scenario in `scenarios/` through the same runner, one after another,
 and lists PASS or FAIL per scenario. It is a Makefile loop, not a separate framework. The
@@ -128,17 +154,24 @@ investigation's range queries can still reach an earlier scenario's fault.
   one access-log line (`method`, `route`, `status`, `duration_ms`). Records logged during a
   request carry `request_id`, `trace_id`, and `span_id`. Telemetry export failures are logged
   to stdout only.
-- Agent logs: structured logs per LLM request (model, stop reason, latency, tokens) and per tool
-  call (tool, input, duration, outcome), plus an investigation summary with the trace ID. They go
-  to stderr only.
+- Agent logs: structured logs per successful LLM request (model, stop reason, latency, tokens),
+  per failed request (latency and error kind), and per tool call (tool, input, duration, outcome).
+  Both successful and failed LLM request logs include attempts and retries. An investigation
+  summary carries the trace ID and counter totals. Logs go to stderr only.
 - Agent traces: when an OTLP traces endpoint is configured (`make eval` sets Tempo's), each
   investigation is one trace under the service name `ai-sre-agent`. The root `investigation`
   span records the incident, budgets, outcome (`diagnosed`, `budget_exhausted`, `timeout`,
   `model_stopped`, `cancelled`, `llm_error`), the accepted root-cause code, and totals. Its
-  children are one `llm.request` span per model request (model, finish reason, tokens, cost, and
-  error kind on failure, using GenAI semantic-convention names where they exist) and one
+  children are one `llm.request` span per model request (attempts, retries, model, finish reason,
+  tokens, cost, and error kind on failure, using GenAI semantic-convention names where they
+  exist) and one
   `tool.<name>` span per tool call from the registry (tool, input and output sizes, error code;
   `tool.unknown` for names that are not registered, which keeps model-chosen names out of span
   names). The request whose diagnosis was accepted is named `llm.final_diagnosis`. LLM spans end
   when the response arrives, so tool calls are their siblings, and rejected diagnoses are
   `diagnosis.rejected` events on the root span.
+  Request spans record `llm.attempts` and `llm.retries` on success and failure; the root records
+  `investigation.llm_retries`, `investigation.rejected_diagnoses`,
+  `investigation.duplicate_tool_calls` and `investigation.invalid_tool_calls` alongside the
+  existing totals. Failed generations contribute attempt metadata only; partial message,
+  model and token data are not treated as a successful response.
