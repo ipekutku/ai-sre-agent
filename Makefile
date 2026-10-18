@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check vet test ci up down fault-inventory-latency fault-inventory-errors fault-clear eval eval-repeat eval-all
+.PHONY: fmt fmt-check vet test test-race ci up down fault-inventory-latency fault-inventory-errors fault-clear eval eval-repeat eval-all
 
 COMPOSE := docker compose -f deploy/docker-compose.yml
 INVENTORY_ADMIN := http://127.0.0.1:9081
@@ -30,7 +30,11 @@ vet:
 test:
 	go test ./...
 
-## ci: run the same checks as CI
+## test-race: run all tests with the race detector
+test-race:
+	go test -race ./...
+
+## ci: run formatting, vet, and tests (CI also runs test-race)
 ci: fmt-check vet test
 
 ## up: build and start the local environment (services, Prometheus, Tempo, Loki, Grafana)

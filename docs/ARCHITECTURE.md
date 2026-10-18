@@ -1,7 +1,7 @@
 # Architecture
 
 This document describes the system as implemented (Milestones 1 and 2, plus Milestone 3
-investigation recording and counters). For goals and long-term direction, see
+investigation recording, counters, and reusable scenario execution). For goals and long-term direction, see
 [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
 
 ## Overview
@@ -47,7 +47,35 @@ investigation recording and counters). For goals and long-term direction, see
 | Agent | `internal/agent` | investigation loop, budgets, `submit_diagnosis` validation, stats, in-memory tool-call record, investigation and LLM spans |
 | Diagnosis | `internal/diagnosis` | diagnosis schema and the closed root-cause code list |
 | Evaluation | `internal/evaluation` | loads ground truth; compares diagnosis; report |
-| Runner | `cmd/scenario-runner` | orchestrates one scenario end to end (`make eval`; `make eval-all` runs it for every scenario); sets up the agent's tracer |
+| Runner | `internal/runner` | reusable scenario lifecycle; records timings, traffic, agent result and errors; drains traffic and restores faults |
+| Runner CLI | `cmd/scenario-runner` | flags, dependency and tracer wiring, ground-truth loading, evaluation and report (`make eval`; `make eval-all` runs it for every scenario) |
+
+## Scenario execution
+
+`Runner.Run(ctx, scenarios.Scenario)` executes readiness → clear leftover fault → traffic →
+baseline → fault injection → trigger wait → backend catch-up → investigation → cleanup. It
+returns a `RunRecord` containing scenario ID, incident, step durations (including failed steps),
+trigger value, traffic counts, the full `agent.Result`, and separate investigation and cleanup
+errors. `InvestigationStarted` distinguishes setup failures from investigation failures. The
+record has no ground truth; `internal/runner` does not import the evaluator. Only the incident
+is passed to its `Investigator` interface. `scenarios.Environment` implements the environment
+interface with the existing uninstrumented HTTP operations.
+
+Readiness has a 2 min timeout; trace and log catch-up share a separate 2 min timeout. After
+readiness succeeds, every return attempts fault restoration, even if the initial clear or an
+injection failed. If readiness fails, nothing has been injected and restoration is skipped.
+Cleanup first cancels traffic and waits for all in-flight requests (each bounded by 5 s), then
+clears the fault with an independent 10 s context. It runs after caller cancellation as well.
+Cleanup failures are retained in the record and returned (not logged) as infrastructure errors, joined with any prior lifecycle error. An earlier investigation failure
+and partial agent result remain in their own fields. The record's `Error` is the final returned
+lifecycle error; non-cancellation investigation errors alone remain diagnosis failures.
+
+The CLI evaluates only after execution and cleanup, using the returned diagnosis. Exit codes
+are 0 for PASS, 1 for FAIL, and 2 for infrastructure errors (including cleanup failure) or
+cancellation, so the Makefile loops stop. If investigation started, its report is printed even
+when cleanup fails or the run is cancelled afterwards; a diagnosis PASS does not imply
+successful cleanup. Setup failures before investigation do not produce a diagnosis
+report. Environment reset and suite aggregation remain future Milestone 3 work.
 
 ## Investigation flow
 
@@ -66,11 +94,15 @@ investigation recording and counters). For goals and long-term direction, see
 
 The agent must infer the cause from observations only.
 
-- The agent receives only the incident. `scenario.yaml`'s fault and trigger sections and
-  `ground-truth.yaml` are read by the runner and evaluator only.
+- The agent receives only the incident. The CLI loads `scenario.yaml` through
+  `internal/scenarios` and passes it to `internal/runner`. Ground truth stays with the CLI
+  and evaluator and is never passed to the execution package.
 - `internal/evaluation` is the only package that reads `ground-truth.yaml`.
 - `TestAgentCannotImportGroundTruth` fails if `internal/agent`, `internal/tools`, or
   `internal/llm` depend on `internal/scenarios` or `internal/evaluation`.
+- `TestRunnerCannotImportEvaluation` (in `internal/runner`) fails if the runner's transitive
+  dependencies include `internal/evaluation`. It is an import check only and cannot detect a
+  direct read of `ground-truth.yaml`.
 - The fault admin API is on a separate listener that is not instrumented or traced and is not in the
   agent's service catalog ([ADR 0001](adr/0001-fault-injection-admin-api.md)). Its logger writes
   to stdout only, so fault changes never reach Loki ([ADR 0004](adr/0004-log-backend-and-export.md)).

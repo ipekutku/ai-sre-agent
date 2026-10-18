@@ -17,7 +17,7 @@ the agent never sees.
 metrics, traces, logs, and service metadata, each investigation is itself traced, and three
 incident classes run through the same evaluation.
 
-**Next: Milestone 3: Evaluation Platform** (repeatable runs, a larger scenario catalog, evidence
+**Milestone 3: Evaluation Platform** (in progress: repeatable runs, a larger scenario catalog, evidence
 evaluation, and reports).
 
 Done:
@@ -35,6 +35,7 @@ Done:
 - OpenTelemetry traces of each investigation, viewable in Grafana ([Agent traces](#agent-traces))
 - `make eval`: one scenario end to end, from fault injection to PASS/FAIL; `make eval-all` runs
   them all
+- reusable scenario execution in `internal/runner`, with step timings and explicit cleanup outcomes
 
 As of 2026-10-15 (`claude-sonnet-5-5`), `make eval-repeat` has passed 11 of 11 runs against the
 real API. The agent identifies `INVENTORY_DOWNSTREAM_LATENCY` by combining metrics with traces: it
@@ -71,7 +72,14 @@ with `SCENARIO=scenarios/<id>`). The runner:
    Tempo and Loki can return a trace and a log entry of the alerted service from after that point,
    so the agent never investigates before traces and logs are searchable
 5. gives the agent the incident only; the agent investigates through its tools
-6. compares the diagnosis with `ground-truth.yaml`, prints the report, and clears the fault
+6. stops and drains traffic, clears the fault, then compares the diagnosis with `ground-truth.yaml`
+   and prints the report
+
+Execution lives in [`internal/runner`](internal/runner). Its `RunRecord` contains the incident,
+step timings, trigger value, traffic counts, agent result, and investigation and cleanup errors.
+It contains no ground truth; the CLI loads ground truth and evaluates the result after execution.
+Once the environment is ready, the runner drains traffic and attempts fault restoration with an
+independent 10 s timeout on every exit, including failure and cancellation. Cleanup failures are infrastructure errors even if the diagnosis passes.
 
 The investigation is recorded as a trace in Tempo, and the report prints its ID
 (see [Agent traces](#agent-traces)).
@@ -105,8 +113,9 @@ Investigation:
   trace id:        4bf92f3577b34da6a3ce929d0e0e4736
 ```
 
-The exit code is 0 on PASS, 1 on FAIL, 2 on a setup error. Runner options go in `EVAL_ARGS`,
-e.g. `make eval EVAL_ARGS="-effort high -baseline 30s"` (see `go run ./cmd/scenario-runner -h`).
+The exit code is 0 on PASS, 1 on FAIL, 2 on a setup/cleanup error or cancellation. A completed
+investigation is still printed if cleanup fails; its PASS describes the diagnosis only.
+Runner options go in `EVAL_ARGS`, e.g. `make eval EVAL_ARGS="-effort high -baseline 30s"` (see `go run ./cmd/scenario-runner -h`).
 Without credentials the runner stops immediately. `make down` stops the environment.
 
 Duplicate calls mean repeated tool names and arguments; they still execute and may retrieve

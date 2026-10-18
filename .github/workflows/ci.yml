@@ -21,3 +21,6 @@ jobs:
 
       - name: Format, vet, test
         run: make ci
+
+      - name: Race detector
+        run: make test-race

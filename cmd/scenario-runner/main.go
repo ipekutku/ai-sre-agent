@@ -2,10 +2,10 @@
 // local environment (make up) and evaluates the agent's diagnosis:
 //
 //	wait for environment -> generate traffic -> baseline -> inject fault ->
-//	wait for alert condition -> wait for traces and logs -> investigate -> evaluate -> clean up
+//	wait for alert condition -> wait for traces and logs -> investigate -> clean up -> evaluate
 //
-// The runner reads both scenario.yaml and ground-truth.yaml. The agent only
-// receives the scenario's incident.
+// The CLI loads the scenario and ground truth, wires internal/runner, and
+// evaluates its RunRecord after execution. The agent receives only the incident.
 //
 // The investigation is traced (service name "ai-sre-agent") when an OTLP
 // traces endpoint is configured through the standard OTEL_EXPORTER_OTLP_*
@@ -36,6 +36,7 @@ import (
 	"github.com/ipekutku/ai-sre-agent/internal/diagnosis"
 	"github.com/ipekutku/ai-sre-agent/internal/evaluation"
 	"github.com/ipekutku/ai-sre-agent/internal/llm/anthropic"
+	"github.com/ipekutku/ai-sre-agent/internal/runner"
 	"github.com/ipekutku/ai-sre-agent/internal/scenarios"
 	"github.com/ipekutku/ai-sre-agent/internal/telemetry"
 	"github.com/ipekutku/ai-sre-agent/internal/tools"
@@ -174,87 +175,29 @@ func run(ctx context.Context, logger *slog.Logger, out io.Writer, o options) (bo
 		TracerProvider: providers.Tracer,
 	})
 
-	// 1. Environment ready, no leftover fault.
-	logger.Info("waiting for environment")
-	readyCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	err = env.WaitReady(readyCtx)
-	cancel()
-	if err != nil {
-		return false, fmt.Errorf("environment not ready (did you run make up?): %w", err)
-	}
-	if err := env.ClearFault(ctx); err != nil {
-		return false, fmt.Errorf("reset fault: %w", err)
-	}
-	// Always leave the environment healthy, even on failure or Ctrl-C.
-	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := env.ClearFault(cleanupCtx); err != nil {
-			logger.Error("failed to clear fault", "error", err)
-		}
-	}()
+	execution := runner.New(env, investigator, logger, runner.Config{RPS: o.rps, Baseline: o.baseline})
+	record, runErr := execution.Run(ctx, sc)
+	return report(out, sc, gt, record, runErr)
+}
 
-	// 2. Traffic for the whole scenario.
-	trafficCtx, stopTraffic := context.WithCancel(ctx)
-	trafficDone := make(chan scenarios.TrafficStats, 1)
-	go func() { trafficDone <- env.GenerateTraffic(trafficCtx, o.rps) }()
-	defer stopTraffic()
-
-	// 3. Baseline.
-	logger.Info("collecting baseline", "duration", o.baseline, "rps", o.rps)
-	if err := sleep(ctx, o.baseline); err != nil {
-		return false, err
+// report evaluates only after execution and cleanup. An investigation's result
+// remains visible even if cleanup fails, but a lifecycle error always exits 2.
+func report(out io.Writer, sc scenarios.Scenario, gt evaluation.GroundTruth, record runner.RunRecord, runErr error) (bool, error) {
+	if !record.InvestigationStarted {
+		return false, runErr
 	}
-
-	// 4. Fault, then wait until the alert condition is observable and the
-	// trace and log backends have caught up.
-	logger.Info("injecting fault", "service", sc.Fault.Service, "type", sc.Fault.Type)
-	if err := env.ApplyFault(ctx, sc.Fault); err != nil {
-		return false, fmt.Errorf("inject fault: %w", err)
-	}
-	value, err := env.WaitForTrigger(ctx, sc.Trigger)
-	if err != nil {
-		return false, err
-	}
-	triggered := time.Now()
-	logger.Info("alert condition met; waiting for traces and logs to be searchable", "value", value)
-
-	// The agent should be able to see traces and logs of the incident it is
-	// given. Logs are usually searchable before traces, so the second wait is
-	// normally immediate.
-	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-	if err := env.WaitForTraces(waitCtx, sc.Incident.Service, triggered); err != nil {
-		return false, fmt.Errorf("traces not searchable in tempo: %w", err)
-	}
-	traceWait := time.Since(triggered)
-	if err := env.WaitForLogs(waitCtx, sc.Incident.Service, triggered); err != nil {
-		return false, fmt.Errorf("logs not searchable in loki: %w", err)
-	}
-	cancel()
-	logger.Info("raising incident", "incident_id", sc.Incident.IncidentID,
-		"trace_wait", traceWait.Round(100*time.Millisecond),
-		"total_wait", time.Since(triggered).Round(100*time.Millisecond))
-
-	// 5. Investigate. The agent receives only the incident.
-	result, invErr := investigator.Investigate(ctx, sc.Incident)
-
-	stopTraffic()
-	traffic := <-trafficDone
-
-	// 6. Evaluate and report.
-	ev := evaluation.Evaluate(sc, gt, result.Diagnosis)
-	if invErr != nil {
+	ev := evaluation.Evaluate(sc, gt, record.Result.Diagnosis)
+	if record.InvestigationError != nil {
 		ev.Pass = false
 		ev.Actual = ""
-		ev.Reason = "investigation failed: " + invErr.Error()
+		ev.Reason = "investigation failed: " + record.InvestigationError.Error()
 	}
 	if err := evaluation.WriteReport(out, ev); err != nil {
-		return false, err
+		return false, errors.Join(runErr, err)
 	}
-	writeDetails(out, result, traffic)
-	if errors.Is(invErr, context.Canceled) {
-		return false, invErr
+	writeDetails(out, record.Result, record.Traffic)
+	if runErr != nil {
+		return false, runErr
 	}
 	return ev.Pass, nil
 }
@@ -317,14 +260,5 @@ func writeList(w io.Writer, title string, ev []diagnosis.Evidence) {
 	fmt.Fprintf(w, "\n%s:\n", title)
 	for _, e := range ev {
 		fmt.Fprintf(w, "  - [%s] %s\n", e.Source, e.Observation)
-	}
-}
-
-func sleep(ctx context.Context, d time.Duration) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(d):
-		return nil
 	}
 }
