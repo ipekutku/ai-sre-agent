@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"reflect"
@@ -31,10 +32,11 @@ type fakeEnvironment struct {
 	clears    int
 	fault     bool
 	since     time.Time
+	wantRPS   int
 }
 
 func newEnvironment(t *testing.T) *fakeEnvironment {
-	return &fakeEnvironment{t: t, started: make(chan struct{}), stopping: make(chan struct{}), drained: make(chan struct{})}
+	return &fakeEnvironment{t: t, started: make(chan struct{}), stopping: make(chan struct{}), drained: make(chan struct{}), wantRPS: 20}
 }
 
 func (e *fakeEnvironment) event(name string) {
@@ -85,8 +87,8 @@ func (e *fakeEnvironment) ClearFault(ctx context.Context) error {
 }
 
 func (e *fakeEnvironment) GenerateTraffic(ctx context.Context, rps int) scenarios.TrafficStats {
-	if rps != 20 {
-		e.t.Errorf("traffic rate = %d, want 20", rps)
+	if rps != e.wantRPS {
+		e.t.Errorf("traffic rate = %d, want %d", rps, e.wantRPS)
 	}
 	e.event("traffic")
 	close(e.started)
@@ -113,7 +115,10 @@ func (e *fakeEnvironment) WaitForTrigger(ctx context.Context, trigger scenarios.
 	if trigger.Query != "test_trigger" {
 		e.t.Errorf("trigger = %+v", trigger)
 	}
-	return 0.8, e.step(ctx, "trigger")
+	if err := e.step(ctx, "trigger"); err != nil {
+		return 0, err // Match scenarios.Environment: no fired value on failure.
+	}
+	return 0.8, nil
 }
 
 func (e *fakeEnvironment) WaitForTraces(ctx context.Context, service string, since time.Time) error {
@@ -145,6 +150,15 @@ type fakeLLM func(context.Context, llm.Request) (llm.Response, error)
 
 func (f fakeLLM) Generate(ctx context.Context, req llm.Request) (llm.Response, error) {
 	return f(ctx, req)
+}
+
+type fakeInvestigator struct {
+	result agent.Result
+	err    error
+}
+
+func (f fakeInvestigator) Investigate(context.Context, incident.Incident) (agent.Result, error) {
+	return f.result, f.err
 }
 
 func newTestRunner(t *testing.T, env *fakeEnvironment) (*Runner, scenarios.Scenario) {
@@ -249,6 +263,59 @@ func TestRunRestoresAfterFailures(t *testing.T) {
 			if stage != "ready" && stage != "reset" && record.Traffic.OK != 12 {
 				t.Errorf("traffic not drained: %+v", record.Traffic)
 			}
+			if stage == "trigger" && record.TriggerValue != 0 {
+				t.Errorf("failed trigger value = %v, want 0", record.TriggerValue)
+			}
+			failedStep := stage
+			if stage == "traces" || stage == "logs" {
+				failedStep = "backends"
+			}
+			tm := record.Timings
+			failed := false
+			for _, step := range []struct {
+				name     string
+				duration time.Duration
+			}{
+				{"ready", tm.Ready}, {"reset", tm.FaultReset}, {"baseline", tm.Baseline},
+				{"fault", tm.Fault}, {"trigger", tm.TriggerWait}, {"backends", tm.BackendWait},
+				{"investigate", tm.Investigation}, {"cleanup", tm.Cleanup},
+			} {
+				switch {
+				case step.name == failedStep:
+					failed = true
+					if step.duration <= 0 {
+						t.Errorf("failed %s timing = %s, want > 0", step.name, step.duration)
+					}
+				case failed && step.name != "cleanup" && step.duration != 0:
+					t.Errorf("skipped %s timing = %s, want 0", step.name, step.duration)
+				}
+			}
+		})
+	}
+}
+
+func TestRunTreatsInvestigationCancellationAsInfrastructureError(t *testing.T) {
+	for _, invErr := range []error{context.Canceled, fmt.Errorf("llm request: %w", context.Canceled)} {
+		t.Run(invErr.Error(), func(t *testing.T) {
+			env := newEnvironment(t)
+			r, sc := newTestRunner(t, env)
+			result := agent.Result{Stats: agent.Stats{LLMRequests: 1}}
+			r = New(env, fakeInvestigator{result: result, err: invErr}, r.logger, r.cfg)
+			ctx := context.Background()
+			record, err := r.Run(ctx, sc)
+			if ctx.Err() != nil {
+				t.Fatalf("caller context ended: %v", ctx.Err())
+			}
+			if !errors.Is(err, context.Canceled) || !errors.Is(record.Error, context.Canceled) ||
+				!record.InvestigationStarted || !errors.Is(record.InvestigationError, context.Canceled) {
+				t.Errorf("investigation cancellation lost: %v, %+v", err, record)
+			}
+			if record.CleanupError != nil || env.fault || env.events[len(env.events)-1] != "cleanup" {
+				t.Errorf("cleanup failed: %+v, events=%v", record, env.events)
+			}
+			if !reflect.DeepEqual(record.Result, result) {
+				t.Errorf("partial result = %+v, want %+v", record.Result, result)
+			}
 		})
 	}
 }
@@ -327,6 +394,38 @@ func TestRunCancellation(t *testing.T) {
 	}
 }
 
+// cancellingInvestigator completes a diagnosis and then the caller cancels,
+// as with a Ctrl-C just after the investigation returns.
+type cancellingInvestigator struct {
+	result agent.Result
+	cancel context.CancelFunc
+}
+
+func (c cancellingInvestigator) Investigate(context.Context, incident.Incident) (agent.Result, error) {
+	c.cancel()
+	return c.result, nil
+}
+
+func TestRunCancellationAfterSuccessfulInvestigation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	env := newEnvironment(t)
+	r, sc := newTestRunner(t, env)
+	result := agent.Result{Stats: agent.Stats{LLMRequests: 1}}
+	result.Diagnosis.RootCause.Code = "INVENTORY_DOWNSTREAM_LATENCY"
+	r = New(env, cancellingInvestigator{result: result, cancel: cancel}, r.logger, r.cfg)
+	record, err := r.Run(ctx, sc)
+	if !errors.Is(err, context.Canceled) || !errors.Is(record.Error, context.Canceled) {
+		t.Errorf("late cancellation lost: %v, %+v", err, record)
+	}
+	if !record.InvestigationStarted || record.InvestigationError != nil || !reflect.DeepEqual(record.Result, result) {
+		t.Errorf("completed investigation not retained: %+v", record)
+	}
+	if record.CleanupError != nil || env.fault || env.events[len(env.events)-1] != "cleanup" {
+		t.Errorf("cleanup after late cancellation failed: %+v, events=%v", record, env.events)
+	}
+}
+
 func TestRunWaitsForTrafficDrain(t *testing.T) {
 	env := newEnvironment(t)
 	gate := make(chan struct{})
@@ -394,7 +493,7 @@ func TestRunPreservesCancellationAndCleanupFailure(t *testing.T) {
 }
 
 func TestRunValidatesBeforeIO(t *testing.T) {
-	for _, invalid := range []string{"scenario", "rps", "baseline", "cancelled"} {
+	for _, invalid := range []string{"scenario", "rps", "rps upper bound", "baseline", "cancelled"} {
 		t.Run(invalid, func(t *testing.T) {
 			env := newEnvironment(t)
 			r, sc := newTestRunner(t, env)
@@ -405,6 +504,8 @@ func TestRunValidatesBeforeIO(t *testing.T) {
 				sc.ID = ""
 			case "rps":
 				r.cfg.RPS = 0
+			case "rps upper bound":
+				r.cfg.RPS = int(time.Second) + 1
 			case "baseline":
 				r.cfg.Baseline = -time.Second
 			case "cancelled":
@@ -415,5 +516,19 @@ func TestRunValidatesBeforeIO(t *testing.T) {
 				t.Errorf("invalid run performed I/O: %v, %+v, events=%v", err, record, env.events)
 			}
 		})
+	}
+}
+
+func TestRunAcceptsZeroBaselineAndMinimumRPS(t *testing.T) {
+	env := newEnvironment(t)
+	env.wantRPS = 1
+	r, sc := newTestRunner(t, env)
+	r.cfg = Config{RPS: 1, Baseline: 0}
+	record, err := r.Run(context.Background(), sc)
+	if err != nil || record.Error != nil || record.InvestigationError != nil || record.CleanupError != nil {
+		t.Fatalf("Run errors: %v, %+v", err, record)
+	}
+	if !record.InvestigationStarted || record.Result.Diagnosis.IncidentID != sc.Incident.IncidentID || env.fault {
+		t.Errorf("run did not complete successfully: %+v, fault=%v", record, env.fault)
 	}
 }

@@ -17,7 +17,8 @@ import (
 
 // Environment provides the runner's environment controls. These operations must
 // use uninstrumented I/O so fault details cannot reach the agent's tools.
-// GenerateTraffic must stop and drain in-flight requests when ctx ends.
+// GenerateTraffic must stop, drain in-flight requests, and return within a
+// bounded time after ctx ends: cleanup waits for it without its own timeout.
 type Environment interface {
 	WaitReady(context.Context) error
 	ClearFault(context.Context) error

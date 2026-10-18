@@ -11,6 +11,7 @@ import (
 	"github.com/ipekutku/ai-sre-agent/internal/diagnosis"
 	"github.com/ipekutku/ai-sre-agent/internal/evaluation"
 	"github.com/ipekutku/ai-sre-agent/internal/incident"
+	"github.com/ipekutku/ai-sre-agent/internal/llm"
 	"github.com/ipekutku/ai-sre-agent/internal/runner"
 	"github.com/ipekutku/ai-sre-agent/internal/scenarios"
 )
@@ -33,6 +34,50 @@ func TestWriteDetailsIncludesInvestigationCounters(t *testing.T) {
 	}
 }
 
+func TestWriteDetailsPrintsDiagnosis(t *testing.T) {
+	for _, code := range []string{"INVENTORY_DOWNSTREAM_LATENCY", ""} {
+		t.Run("code="+code, func(t *testing.T) {
+			result := agent.Result{
+				Stats: agent.Stats{
+					Usage:   llm.Usage{CostKnown: true, CostUSD: 0.0308},
+					TraceID: "73366e683a1c2f6afc232dd78e6d4611",
+				},
+				Diagnosis: diagnosis.Diagnosis{
+					RootCause:          diagnosis.RootCause{Code: code, Summary: "inventory-api is slow"},
+					Confidence:         0.9,
+					Evidence:           []diagnosis.Evidence{{Source: "prometheus", Observation: "inventory latency is elevated"}},
+					RecommendedActions: []string{"Inspect inventory-api", "Check recent deployments"},
+				},
+			}
+			var out bytes.Buffer
+			writeDetails(&out, result, scenarios.TrafficStats{})
+			for _, want := range []string{
+				"  estimated cost:  $0.0308\n",
+				"  trace id:        73366e683a1c2f6afc232dd78e6d4611\n",
+			} {
+				if !strings.Contains(out.String(), want) {
+					t.Errorf("report missing %q:\n%s", want, out.String())
+				}
+			}
+			if code == "" {
+				if strings.Contains(out.String(), "Diagnosis (") {
+					t.Errorf("empty root-cause code printed diagnosis:\n%s", out.String())
+				}
+				return
+			}
+			for _, want := range []string{
+				"Diagnosis (confidence 0.90):\n  inventory-api is slow\n",
+				"Evidence:\n  - [prometheus] inventory latency is elevated\n",
+				"Recommended actions:\n  - Inspect inventory-api\n  - Check recent deployments\n",
+			} {
+				if !strings.Contains(out.String(), want) {
+					t.Errorf("report missing %q:\n%s", want, out.String())
+				}
+			}
+		})
+	}
+}
+
 func TestReportOutcomes(t *testing.T) {
 	sc := scenarios.Scenario{ID: "example", Incident: incident.Incident{IncidentID: "inc-001"}}
 	gt := evaluation.GroundTruth{ExpectedRootCause: evaluation.ExpectedRootCause{Code: "INVENTORY_DOWNSTREAM_LATENCY"}}
@@ -49,11 +94,14 @@ func TestReportOutcomes(t *testing.T) {
 		runErr     error
 		wantPass   bool
 		wantReport string
+		wantActual string
 	}{
 		{name: "pass", started: true, diagnosis: valid, wantPass: true, wantReport: "Result:\nPASS\n"},
 		{name: "invalid diagnosis", started: true, wantReport: "Result:\nFAIL\n"},
 		{name: "investigation failure", started: true, invErr: agent.ErrBudgetExhausted, wantReport: "investigation failed: " + agent.ErrBudgetExhausted.Error()},
+		{name: "valid diagnosis with investigation failure", started: true, diagnosis: valid, invErr: agent.ErrBudgetExhausted, wantReport: "Result:\nFAIL\n", wantActual: "(none)"},
 		{name: "cancelled", started: true, invErr: context.Canceled, runErr: context.Canceled, wantReport: "Result:\nFAIL\n"},
+		{name: "diagnosed but cancelled afterwards", started: true, diagnosis: valid, runErr: context.Canceled, wantReport: "Result:\nPASS\n"},
 		{name: "diagnosed but cleanup failed", started: true, diagnosis: valid, runErr: cleanupErr, wantReport: "Result:\nPASS\n"},
 		{name: "investigation and cleanup failed", started: true, invErr: agent.ErrBudgetExhausted, runErr: cleanupErr, wantReport: "investigation failed: " + agent.ErrBudgetExhausted.Error()},
 		{name: "setup failure", runErr: errors.New("not ready")},
@@ -72,6 +120,9 @@ func TestReportOutcomes(t *testing.T) {
 			if tc.wantReport != "" && !strings.Contains(out.String(), tc.wantReport) {
 				t.Errorf("report missing %q:\n%s", tc.wantReport, out.String())
 			}
+			if tc.wantActual != "" && !strings.Contains(out.String(), "Actual:\n"+tc.wantActual+"\n") {
+				t.Errorf("report actual != %q:\n%s", tc.wantActual, out.String())
+			}
 		})
 	}
 }
@@ -82,9 +133,19 @@ func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
 
 func TestReportPreservesLifecycleErrorWhenWritingFails(t *testing.T) {
 	writeErr, cleanupErr := errors.New("write failed"), errors.New("cleanup failed")
-	_, err := report(failingWriter{writeErr}, scenarios.Scenario{}, evaluation.GroundTruth{},
-		runner.RunRecord{InvestigationStarted: true}, cleanupErr)
-	if !errors.Is(err, writeErr) || !errors.Is(err, cleanupErr) {
-		t.Errorf("report error = %v; want write and cleanup errors", err)
+	for _, tc := range []struct {
+		name   string
+		runErr error
+	}{
+		{"with lifecycle error", cleanupErr},
+		{"without lifecycle error", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pass, err := report(failingWriter{writeErr}, scenarios.Scenario{}, evaluation.GroundTruth{},
+				runner.RunRecord{InvestigationStarted: true}, tc.runErr)
+			if pass || !errors.Is(err, writeErr) || (tc.runErr != nil && !errors.Is(err, tc.runErr)) {
+				t.Errorf("report = %v, %v; want false, write error and lifecycle error %v", pass, err, tc.runErr)
+			}
+		})
 	}
 }
