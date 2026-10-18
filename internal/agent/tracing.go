@@ -67,6 +67,10 @@ func endInvestigation(span trace.Span, res Result, err error) {
 		attribute.Int("investigation.llm_requests", s.LLMRequests),
 		attribute.Int("investigation.tool_calls", s.ToolCalls),
 		attribute.Int("investigation.failed_tool_calls", s.FailedToolCalls),
+		attribute.Int("investigation.rejected_diagnoses", s.RejectedDiagnoses),
+		attribute.Int("investigation.duplicate_tool_calls", s.DuplicateToolCalls),
+		attribute.Int("investigation.invalid_tool_calls", s.InvalidToolCalls),
+		attribute.Int("investigation.llm_retries", s.LLMRetries),
 	)
 	span.SetAttributes(usageAttributes(s.Usage)...)
 	if err != nil {
@@ -116,7 +120,15 @@ func (a *Agent) startLLMRequest(ctx context.Context, n int) (context.Context, ll
 	return ctx, llmSpan{span: span}
 }
 
-// failed records a request that returned no response and ends the span.
+// attempted records dispatch metadata on both successful and failed requests.
+func (s *llmSpan) attempted(attempts int) {
+	s.span.SetAttributes(
+		attribute.Int("llm.attempts", attempts),
+		attribute.Int("llm.retries", max(attempts-1, 0)),
+	)
+}
+
+// failed records a failed generation and ends the span.
 func (s *llmSpan) failed(err error) {
 	s.span.SetAttributes(attribute.String("llm.error_kind", string(llm.KindOf(err))))
 	s.span.SetStatus(codes.Error, err.Error())

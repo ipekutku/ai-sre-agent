@@ -95,7 +95,14 @@ func newAgent(t *testing.T, client llm.Client, cfg Config) (*Agent, *echoTool) {
 // mustRegistry returns a registry of ts that traces with cfg's provider.
 func mustRegistry(t *testing.T, cfg Config, ts ...tools.Tool) *tools.Registry {
 	t.Helper()
-	reg, err := tools.NewRegistry(discardLogger(), tools.Options{TracerProvider: cfg.TracerProvider}, ts...)
+	return mustRegistryOpts(t, cfg, tools.Options{}, ts...)
+}
+
+// mustRegistryOpts is mustRegistry with explicit registry options.
+func mustRegistryOpts(t *testing.T, cfg Config, opts tools.Options, ts ...tools.Tool) *tools.Registry {
+	t.Helper()
+	opts.TracerProvider = cfg.TracerProvider
+	reg, err := tools.NewRegistry(discardLogger(), opts, ts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,6 +174,9 @@ func TestInvestigateRejectsInvalidSubmission(t *testing.T) {
 	}
 	if res.Diagnosis.RootCause.Code != "INVENTORY_DOWNSTREAM_LATENCY" || res.Stats.LLMRequests != 3 {
 		t.Errorf("result = %+v", res)
+	}
+	if res.Stats.RejectedDiagnoses != 2 || res.Stats.ToolCalls != 0 || len(res.ToolCalls) != 0 {
+		t.Errorf("submission accounting = %+v", res)
 	}
 	for i, want := range []string{"not a known root-cause code", "at least one evidence"} {
 		r := client.requests[i+1].Messages[len(client.requests[i+1].Messages)-1].Content[0]

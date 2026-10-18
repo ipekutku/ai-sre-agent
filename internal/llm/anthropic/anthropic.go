@@ -147,12 +147,21 @@ func (c *Client) Generate(ctx context.Context, req llm.Request) (llm.Response, e
 	}
 
 	start := time.Now()
-	msg, err := c.sdk.Messages.New(ctx, params)
+	// Request-local middleware runs once per SDK attempt, after credential
+	// resolution. Keeping the counter here isolates concurrent generations and
+	// excludes Check's model lookup without changing the SDK's retry policy.
+	attempts := 0
+	msg, err := c.sdk.Messages.New(ctx, params, option.WithMiddleware(func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+		attempts++
+		return next(req)
+	}))
 	latency := time.Since(start)
 	if err != nil {
-		return llm.Response{}, classify(err)
+		return llm.Response{Attempts: attempts, Latency: latency}, classify(err)
 	}
-	return fromMessage(msg, latency)
+	resp, err := fromMessage(msg, latency)
+	resp.Attempts = attempts
+	return resp, err
 }
 
 func toParams(msgs []llm.Message) ([]sdk.MessageParam, error) {

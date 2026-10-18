@@ -81,6 +81,17 @@ type Stats struct {
 	LLMRequests     int
 	ToolCalls       int
 	FailedToolCalls int
+	// RejectedDiagnoses counts invalid submit_diagnosis requests, which do not
+	// consume the tool-call budget.
+	RejectedDiagnoses int
+	// DuplicateToolCalls counts dispatched calls with the same tool and
+	// canonical input as an earlier call. Repetitions still execute and can be
+	// useful for fresh data or recovery; this is not a wasted-work metric.
+	DuplicateToolCalls int
+	// InvalidToolCalls counts invalid_input and unknown_tool dispatch failures.
+	InvalidToolCalls int
+	// LLMRetries sums max(Attempts-1, 0), including failed generations.
+	LLMRetries int
 	// ToolCallsByName counts executed tool calls (including failed ones) per
 	// requested tool name.
 	ToolCallsByName map[string]int
@@ -97,6 +108,10 @@ type Stats struct {
 type Result struct {
 	Diagnosis diagnosis.Diagnosis
 	Stats     Stats
+	// ToolCalls is an owned record of registry dispatches, including failures.
+	// It excludes submissions and requests rejected by the tool-call budget.
+	// It is retained on investigation errors and never added to model context.
+	ToolCalls []ToolCall
 }
 
 // Investigate runs one investigation of inc.
@@ -122,6 +137,10 @@ func (a *Agent) Investigate(ctx context.Context, inc incident.Incident) (res Res
 			"llm_requests", res.Stats.LLMRequests,
 			"tool_calls", res.Stats.ToolCalls,
 			"failed_tool_calls", res.Stats.FailedToolCalls,
+			"rejected_diagnoses", res.Stats.RejectedDiagnoses,
+			"duplicate_tool_calls", res.Stats.DuplicateToolCalls,
+			"invalid_tool_calls", res.Stats.InvalidToolCalls,
+			"llm_retries", res.Stats.LLMRetries,
 			"input_tokens", res.Stats.Usage.InputTokens,
 			"output_tokens", res.Stats.Usage.OutputTokens,
 			"cost_usd", res.Stats.Usage.CostUSD,
@@ -139,6 +158,7 @@ func (a *Agent) Investigate(ctx context.Context, inc incident.Incident) (res Res
 		Tools:    a.toolDefinitions(),
 	}
 	res.Stats.Usage.CostKnown = true
+	seen := make(map[toolCallKey]struct{})
 
 	for {
 		if res.Stats.LLMRequests >= a.cfg.MaxLLMRequests {
@@ -148,8 +168,14 @@ func (a *Agent) Investigate(ctx context.Context, inc incident.Incident) (res Res
 		llmCtx, call := a.startLLMRequest(ctx, res.Stats.LLMRequests+1)
 		resp, err := a.llm.Generate(llmCtx, req)
 		res.Stats.LLMRequests++
+		retries := max(resp.Attempts-1, 0)
+		res.Stats.LLMRetries += retries
+		call.attempted(resp.Attempts)
 		if err != nil {
 			call.failed(err)
+			log.Warn("llm request failed", "request", res.Stats.LLMRequests,
+				"attempts", resp.Attempts, "retries", retries,
+				"latency_ms", resp.Latency.Milliseconds(), "error_kind", llm.KindOf(err))
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				return res, fmt.Errorf("%w after %s: %w", ErrTimeout, a.cfg.MaxDuration, err)
 			}
@@ -160,6 +186,7 @@ func (a *Agent) Investigate(ctx context.Context, inc incident.Incident) (res Res
 		res.Stats.Models = appendUnique(res.Stats.Models, resp.Model)
 		log.Info("llm request",
 			"request", res.Stats.LLMRequests, "model", resp.Model, "stop_reason", resp.StopReason,
+			"attempts", resp.Attempts, "retries", retries,
 			"latency_ms", resp.Latency.Milliseconds(), "input_tokens", resp.Usage.InputTokens,
 			"output_tokens", resp.Usage.OutputTokens, "tool_uses", len(resp.ToolUses()))
 
@@ -177,7 +204,7 @@ func (a *Agent) Investigate(ctx context.Context, inc incident.Incident) (res Res
 			return res, fmt.Errorf("%w: stop reason %q", ErrModelStopped, resp.StopReason)
 		}
 
-		results, d, done := a.handleToolUses(ctx, log, inc, resp.ToolUses(), &res.Stats)
+		results, d, done := a.handleToolUses(ctx, log, inc, resp.ToolUses(), &res, seen)
 		call.end(done)
 		if done {
 			res.Diagnosis = d
@@ -189,7 +216,8 @@ func (a *Agent) Investigate(ctx context.Context, inc incident.Incident) (res Res
 
 // handleToolUses answers every tool_use block. If a valid diagnosis is
 // submitted, it returns it with done=true.
-func (a *Agent) handleToolUses(ctx context.Context, log *slog.Logger, inc incident.Incident, uses []llm.Block, stats *Stats) (results []llm.Block, d diagnosis.Diagnosis, done bool) {
+func (a *Agent) handleToolUses(ctx context.Context, log *slog.Logger, inc incident.Incident, uses []llm.Block, res *Result, seen map[toolCallKey]struct{}) (results []llm.Block, d diagnosis.Diagnosis, done bool) {
+	stats := &res.Stats
 	for _, use := range uses {
 		if use.ToolName == submitToolName {
 			d, err := parseSubmission(use.ToolInput, inc.IncidentID)
@@ -197,6 +225,7 @@ func (a *Agent) handleToolUses(ctx context.Context, log *slog.Logger, inc incide
 				return nil, d, true
 			}
 			log.Warn("invalid diagnosis submitted", "error", err)
+			stats.RejectedDiagnoses++
 			trace.SpanFromContext(ctx).AddEvent(rejectedEvent)
 			results = append(results, errorResult(use.ToolUseID, "invalid_input",
 				"diagnosis rejected: "+err.Error()+". Fix it and call "+submitToolName+" again."))
@@ -209,7 +238,12 @@ func (a *Agent) handleToolUses(ctx context.Context, log *slog.Logger, inc incide
 			continue
 		}
 
+		// Snapshot before dispatch: even a tool that mutates its input must not
+		// rewrite the record or its duplicate identity.
+		input := append(json.RawMessage(nil), use.ToolInput...)
+		started := time.Now().UTC()
 		r := a.tools.Call(ctx, use.ToolName, use.ToolInput)
+		res.recordToolCall(use.ToolName, input, started, r, seen)
 		stats.ToolCalls++
 		if stats.ToolCallsByName == nil {
 			stats.ToolCallsByName = map[string]int{}
@@ -217,6 +251,9 @@ func (a *Agent) handleToolUses(ctx context.Context, log *slog.Logger, inc incide
 		stats.ToolCallsByName[use.ToolName]++
 		if r.Err != nil {
 			stats.FailedToolCalls++
+			if r.Err.Code == tools.ErrInvalidInput || r.Err.Code == tools.ErrUnknownTool {
+				stats.InvalidToolCalls++
+			}
 			results = append(results, errorResult(use.ToolUseID, string(r.Err.Code), r.Err.Message))
 			continue
 		}

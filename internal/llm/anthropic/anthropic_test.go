@@ -115,6 +115,9 @@ func TestGenerateRequestAndResponse(t *testing.T) {
 	if resp.StopReason != llm.StopToolUse || resp.Model != "claude-sonnet-5-5" || resp.Latency <= 0 {
 		t.Errorf("response = %+v", resp)
 	}
+	if resp.Attempts != 1 {
+		t.Errorf("attempts = %d, want 1", resp.Attempts)
+	}
 	if resp.Text() != "Checking latency." {
 		t.Errorf("text = %q", resp.Text())
 	}
@@ -194,12 +197,15 @@ func TestGenerateErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			api := &fakeAPI{status: tt.status, body: tt.body}
 			c := newTestClient(t, api, Config{MaxRetries: 1})
-			_, err := c.Generate(context.Background(), llm.Request{Messages: []llm.Message{llm.UserText("hi")}})
+			resp, err := c.Generate(context.Background(), llm.Request{Messages: []llm.Message{llm.UserText("hi")}})
 			if llm.KindOf(err) != tt.wantKind {
 				t.Fatalf("err = %v, want kind %s", err, tt.wantKind)
 			}
 			if got := api.calls.Load(); got != tt.wantCalls {
 				t.Errorf("calls = %d, want %d", got, tt.wantCalls)
+			}
+			if resp.Attempts != int(tt.wantCalls) || resp.Latency <= 0 {
+				t.Errorf("error response metadata = %+v, want %d attempts", resp, tt.wantCalls)
 			}
 			if strings.Contains(err.Error(), "test-key") {
 				t.Error("error message leaks the API key")
@@ -216,9 +222,14 @@ func TestGenerateTransportErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = c.Generate(context.Background(), llm.Request{Messages: []llm.Message{llm.UserText("hi")}})
+	resp, err := c.Generate(context.Background(), llm.Request{Messages: []llm.Message{llm.UserText("hi")}})
 	if llm.KindOf(err) != llm.ErrTransport {
 		t.Errorf("unreachable API: err = %v, want transport", err)
+	}
+	// A connection failure still dispatches one attempt, even though no
+	// response arrives; retries are disabled here.
+	if resp.Attempts != 1 {
+		t.Errorf("unreachable API: attempts = %d, want 1", resp.Attempts)
 	}
 
 	// A cancelled context returns promptly.
@@ -251,8 +262,12 @@ func TestGenerateRejectsInvalidRequests(t *testing.T) {
 		"bad block":  {Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.Block{{Type: "image"}}}}},
 		"bad schema": {Messages: []llm.Message{llm.UserText("x")}, Tools: []llm.Tool{{Name: "t", InputSchema: json.RawMessage(`nope`)}}},
 	} {
-		if _, err := c.Generate(context.Background(), req); llm.KindOf(err) != llm.ErrInvalidRequest {
+		resp, err := c.Generate(context.Background(), req)
+		if llm.KindOf(err) != llm.ErrInvalidRequest {
 			t.Errorf("%s: err = %v, want invalid_request", name, err)
+		}
+		if resp.Attempts != 0 {
+			t.Errorf("%s: attempts = %d before dispatch", name, resp.Attempts)
 		}
 	}
 	if api.calls.Load() != 0 {
