@@ -69,12 +69,13 @@ eval: up
 	$(RUNNER_ENV) go run ./cmd/scenario-runner -scenario $(SCENARIO) $(EVAL_ARGS)
 
 ## eval-repeat: run SCENARIO RUNS times (default 3) and report how many passed; stops at
-##              the first setup error. Waits COOLDOWN seconds (default 300) between runs so
-##              each run's fault shows up as a separate spike in the shared metrics and traces.
-##              The runner is built first because go run reports every failure as exit 1,
-##              hiding the difference between FAIL (1) and setup error (2).
+##              the first setup error. Each run resets the environment, so no cooldown is
+##              needed. With EVAL_ARGS=-reset=false runs share telemetry: set COOLDOWN (seconds)
+##              so each run's fault shows up as a separate spike. The runner is built first
+##              because go run reports every failure as exit 1, hiding the difference between
+##              FAIL (1) and setup error (2).
 RUNS ?= 3
-COOLDOWN ?= 300
+COOLDOWN ?= 0
 eval-repeat: up
 	@case "$(RUNS)" in ''|*[!0-9]*|0) echo "RUNS must be a positive integer"; exit 2;; esac; \
 	case "$(COOLDOWN)" in ''|*[!0-9]*) echo "COOLDOWN must be a whole number of seconds"; exit 2;; esac; \
@@ -92,9 +93,9 @@ eval-repeat: up
 	[ $$pass -eq $(RUNS) ]
 
 ## eval-all: run every scenario in scenarios/ once and print PASS or FAIL for each; stops at
-##           the first setup error. Waits COOLDOWN seconds (default 300) between scenarios
-##           so one scenario's fault has faded from the 30 s alert windows, and shows up as a
-##           separate spike, before the next starts.
+##           the first setup error. Each run resets the environment. With
+##           EVAL_ARGS=-reset=false, set COOLDOWN (e.g. 300) so one scenario's fault has faded
+##           from the 30 s alert windows before the next starts.
 eval-all: up
 	@case "$(COOLDOWN)" in ''|*[!0-9]*) echo "COOLDOWN must be a whole number of seconds"; exit 2;; esac; \
 	dir="$$(mktemp -d)"; trap 'rm -rf "$$dir"' EXIT; \

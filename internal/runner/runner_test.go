@@ -394,6 +394,84 @@ func TestRunCancellation(t *testing.T) {
 	}
 }
 
+type fakeResetter struct {
+	env *fakeEnvironment
+	err error
+}
+
+func (f fakeResetter) Reset(ctx context.Context) error {
+	assertDeadline(f.env.t, ctx, 2*time.Minute)
+	if err := f.env.step(ctx, "recreate"); err != nil {
+		return err
+	}
+	f.env.fault = false // Recreated services start without a fault.
+	return f.err
+}
+
+func TestRunResetsBeforeReadiness(t *testing.T) {
+	env := newEnvironment(t)
+	r, sc := newTestRunner(t, env)
+	r.cfg.Reset = fakeResetter{env: env}
+	record, err := r.Run(context.Background(), sc)
+	if err != nil || record.Error != nil {
+		t.Fatalf("Run errors: %v, %+v", err, record)
+	}
+	want := []string{"recreate", "ready", "reset", "traffic", "fault", "trigger", "traces", "logs", "investigate", "drained", "cleanup"}
+	if !reflect.DeepEqual(env.events, want) {
+		t.Errorf("steps = %v, want %v", env.events, want)
+	}
+	if record.Timings.Reset <= 0 {
+		t.Errorf("reset timing = %s", record.Timings.Reset)
+	}
+}
+
+func TestRunWithoutResetterSkipsReset(t *testing.T) {
+	env := newEnvironment(t)
+	r, sc := newTestRunner(t, env)
+	record, err := r.Run(context.Background(), sc)
+	if err != nil || env.events[0] != "ready" || record.Timings.Reset != 0 {
+		t.Errorf("reset not skipped: %v, events=%v, reset timing=%s", err, env.events, record.Timings.Reset)
+	}
+}
+
+// A failed or cancelled reset is a setup error: nothing was injected, so
+// nothing is restored and the environment is not touched again.
+func TestRunResetFailure(t *testing.T) {
+	resetErr := errors.New("compose failed")
+	for _, tc := range []struct {
+		name    string
+		cancel  bool
+		wantErr error
+	}{
+		{"failure", false, resetErr},
+		{"cancellation", true, context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			env := newEnvironment(t)
+			r, sc := newTestRunner(t, env)
+			r.cfg.Reset = fakeResetter{env: env, err: resetErr}
+			if tc.cancel {
+				env.onStep = func(stepCtx context.Context, name string) error {
+					if name == "recreate" {
+						cancel()
+					}
+					return stepCtx.Err()
+				}
+			}
+			record, err := r.Run(ctx, sc)
+			if !errors.Is(err, tc.wantErr) || !errors.Is(record.Error, tc.wantErr) || !strings.Contains(err.Error(), "reset environment") {
+				t.Fatalf("reset error lost: %v, %+v", err, record)
+			}
+			if !reflect.DeepEqual(env.events, []string{"recreate"}) || record.InvestigationStarted ||
+				record.CleanupError != nil || record.Timings.Cleanup != 0 || record.Timings.Reset <= 0 {
+				t.Errorf("run continued after reset failure: events=%v, record=%+v", env.events, record)
+			}
+		})
+	}
+}
+
 // cancellingInvestigator completes a diagnosis and then the caller cancels,
 // as with a Ctrl-C just after the investigation returns.
 type cancellingInvestigator struct {
