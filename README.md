@@ -45,10 +45,10 @@ scenario passed 4 of 4 runs, at about $0.026–$0.034 per run. The agent queried
 time and linked each checkout-api 502 to an inventory-api 500 through the trace ID. The
 `inventory-timeout` scenario passed 4 of 4 runs, at about $0.042–$0.053 per run. The agent
 used logs, metrics, and traces every time and told the timeouts apart from errors because
-inventory-api answered `499` after about 2 s instead of answering `500`. Because scenarios share one
-environment, a diagnosis can still cite an earlier run's fault: one `inventory-latency` run
+inventory-api answered `499` after about 2 s instead of answering `500`. These runs shared one
+environment, so a diagnosis could cite an earlier run's fault: one `inventory-latency` run
 picked the right code but quoted the 2 s timeouts from the `inventory-timeout` run before it.
-Resetting the environment between runs is planned for Milestone 3.
+The runner now resets the environment before every run.
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan.
 
 ## Running the demo
@@ -64,22 +64,35 @@ make eval
 [`cmd/scenario-runner`](cmd/scenario-runner) on the `inventory-latency` scenario (choose another
 with `SCENARIO=scenarios/<id>`). The runner:
 
-1. waits until the services, Prometheus, Tempo, and Loki are ready, and clears any leftover fault
-2. sends steady `GET /checkout` traffic (20 rps) and records a 60 s baseline
-3. injects the scenario's fault (for `inventory-latency`, inventory-api responds in 800 ms)
-4. waits until the scenario's alert condition holds in Prometheus (for `inventory-latency`,
+1. resets the environment: recreates the two services and the Prometheus, Tempo, and Loki
+   containers, discarding earlier runs' metrics, traces, logs, and fault state (Grafana keeps
+   running). `-reset=false` skips this and keeps the history.
+2. waits until the services, Prometheus, Tempo, and Loki are ready, and clears any leftover fault
+3. sends steady `GET /checkout` traffic (20 rps) and records a 60 s baseline
+4. injects the scenario's fault (for `inventory-latency`, inventory-api responds in 800 ms)
+5. waits until the scenario's alert condition holds in Prometheus (for `inventory-latency`,
    checkout-api p95 > 500 ms), then until
    Tempo and Loki can return a trace and a log entry of the alerted service from after that point,
    so the agent never investigates before traces and logs are searchable
-5. gives the agent the incident only; the agent investigates through its tools
-6. stops and drains traffic, clears the fault, then compares the diagnosis with `ground-truth.yaml`
+6. gives the agent the incident only; the agent investigates through its tools
+7. stops and drains traffic, clears the fault, then compares the diagnosis with `ground-truth.yaml`
    and prints the report
 
 Execution lives in [`internal/runner`](internal/runner). Its `RunRecord` contains the incident,
 step timings, trigger value, traffic counts, agent result, and investigation and cleanup errors.
 It contains no ground truth; the CLI loads ground truth and evaluates the result after execution.
 Once the environment is ready, the runner drains traffic and attempts fault restoration with an
-independent 10 s timeout on every exit, including failure and cancellation. Cleanup failures are infrastructure errors even if the diagnosis passes.
+independent 10 s timeout on every exit, including failure and cancellation. Cleanup failures are
+infrastructure errors even if the diagnosis passes.
+
+The reset runs `docker compose -f deploy/docker-compose.yml up --detach --no-build
+--force-recreate --renew-anon-volumes` for those five services, with fixed arguments and no
+shell (`-compose-file` changes the file). It does not rebuild images, so a series of runs tests
+the code `make up` built. It takes about 11 s, plus about 25 s until the stack is ready again
+(measured 2026-10-26), and has a 2 min timeout. A reset failure is a
+setup error (exit 2). Because Tempo is recreated, an investigation's trace stays viewable only
+until the next run starts.
+See [ADR 0007](docs/adr/0007-environment-reset-by-recreating-containers.md).
 
 The investigation is recorded as a trace in Tempo, and the report prints its ID
 (see [Agent traces](#agent-traces)).
@@ -126,15 +139,14 @@ future evidence evaluation. See [metric definitions](docs/ARCHITECTURE.md#evalua
 
 The model's choices vary from run to run, so a single PASS says little. `make eval-repeat RUNS=5`
 runs the scenario five times and prints how many passed. It exits non-zero if any run failed, and
-stops at the first setup error. Runs share Prometheus, Tempo, and Loki, so an investigation's range
-queries can also see earlier runs' faults. A cooldown between runs (`COOLDOWN`, default 300 s)
-gives each fault its own spike, separated by normal traffic. Each run takes about 2 minutes, so
-with the cooldown five runs take about 30 minutes. `COOLDOWN=0` skips it, for example when the
-timeline doesn't matter.
+stops at the first setup error. Each run starts from a reset environment, so runs cannot see each
+other's faults and need no cooldown. Each run takes about 2.5 minutes, including the reset. With
+`EVAL_ARGS=-reset=false`, runs share Prometheus, Tempo, and Loki and range queries can see earlier
+runs' faults; set `COOLDOWN=300` so each fault gets its own spike, separated by normal traffic.
 
-`make eval-all` runs every scenario once, with the same cooldown between scenarios, then lists
-PASS or FAIL for each. It exits non-zero if any scenario failed, and stops at the first setup
-error. Three scenarios take about 15 minutes.
+`make eval-all` runs every scenario once, each from a reset environment, then lists PASS or FAIL
+for each. It exits non-zero if any scenario failed, and stops at the first setup error. Three
+scenarios take about 8 minutes.
 
 ## Demo services
 

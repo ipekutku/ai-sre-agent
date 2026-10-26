@@ -1,8 +1,13 @@
 // Command scenario-runner runs one incident scenario end to end against the
 // local environment (make up) and evaluates the agent's diagnosis:
 //
-//	wait for environment -> generate traffic -> baseline -> inject fault ->
-//	wait for alert condition -> wait for traces and logs -> investigate -> clean up -> evaluate
+//	reset environment -> wait for environment -> generate traffic -> baseline ->
+//	inject fault -> wait for alert condition -> wait for traces and logs ->
+//	investigate -> clean up -> evaluate
+//
+// The reset recreates the services and the Prometheus, Tempo and Loki
+// containers with a fixed docker compose command, so a run cannot see earlier
+// runs' telemetry. -reset=false keeps the running environment and its history.
 //
 // The CLI loads the scenario and ground truth, wires internal/runner, and
 // evaluates its RunRecord after execution. The agent receives only the incident.
@@ -58,6 +63,8 @@ type options struct {
 	effort         string
 	rps            int
 	baseline       time.Duration
+	reset          bool
+	composeFile    string
 	maxLLMRequests int
 	maxToolCalls   int
 	maxDuration    time.Duration
@@ -76,6 +83,8 @@ func main() {
 	flag.StringVar(&o.effort, "effort", "medium", "effort: low, medium, high, xhigh, max")
 	flag.IntVar(&o.rps, "rps", 20, "checkout requests per second during the scenario")
 	flag.DurationVar(&o.baseline, "baseline", 60*time.Second, "normal-traffic period before the fault")
+	flag.BoolVar(&o.reset, "reset", true, "recreate services and backends before the run, discarding earlier runs' telemetry")
+	flag.StringVar(&o.composeFile, "compose-file", "deploy/docker-compose.yml", "docker compose file used by -reset")
 	flag.IntVar(&o.maxLLMRequests, "max-llm-requests", 20, "investigation LLM request budget")
 	flag.IntVar(&o.maxToolCalls, "max-tool-calls", 15, "investigation tool-call budget")
 	flag.DurationVar(&o.maxDuration, "max-duration", 5*time.Minute, "investigation time limit")
@@ -175,7 +184,11 @@ func run(ctx context.Context, logger *slog.Logger, out io.Writer, o options) (bo
 		TracerProvider: providers.Tracer,
 	})
 
-	execution := runner.New(env, investigator, logger, runner.Config{RPS: o.rps, Baseline: o.baseline})
+	cfg := runner.Config{RPS: o.rps, Baseline: o.baseline}
+	if o.reset {
+		cfg.Reset = scenarios.ComposeReset{File: o.composeFile}
+	}
+	execution := runner.New(env, investigator, logger, cfg)
 	record, runErr := execution.Run(ctx, sc)
 	return report(out, sc, gt, record, runErr)
 }

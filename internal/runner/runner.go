@@ -29,23 +29,33 @@ type Environment interface {
 	WaitForLogs(context.Context, string, time.Time) error
 }
 
+// Resetter recreates the environment so a run cannot observe an earlier run's
+// telemetry or state. It must use a fixed command; no scenario or model input
+// reaches it.
+type Resetter interface {
+	Reset(context.Context) error
+}
+
 // Investigator receives only the incident, never the scenario or ground truth.
 type Investigator interface {
 	Investigate(context.Context, incident.Incident) (agent.Result, error)
 }
 
-// Config controls traffic and the baseline period. The runner fixes the other
-// timeouts: readiness (2m), backend catch-up (2m shared), and fault restoration (10s).
+// Config controls traffic, the baseline period, and the environment reset. The
+// runner fixes the timeouts: reset (2m), readiness (2m), backend catch-up (2m
+// shared), and fault restoration (10s).
 type Config struct {
 	RPS      int
 	Baseline time.Duration
+	// Reset runs before readiness; nil keeps the environment and its history.
+	Reset Resetter
 }
 
 // Timings records elapsed wall time for each attempted step, including failures.
 // Cleanup includes stopping and draining traffic before restoring the fault.
 // Unattempted steps have zero duration.
 type Timings struct {
-	Ready, FaultReset, Baseline, Fault, TriggerWait, BackendWait, Investigation, Cleanup time.Duration
+	Reset, Ready, FaultReset, Baseline, Fault, TriggerWait, BackendWait, Investigation, Cleanup time.Duration
 }
 
 // RunRecord contains observations and outcomes only, with no ground truth.
@@ -77,11 +87,13 @@ func New(env Environment, investigator Investigator, logger *slog.Logger, cfg Co
 	return &Runner{env: env, investigator: investigator, logger: logger, cfg: cfg}
 }
 
-// Run executes readiness, fault reset, traffic, baseline, fault injection, trigger
-// and backend waits, investigation, and cleanup. Non-cancellation investigation
-// errors belong to the result (a diagnosis FAIL), not infrastructure errors.
-// Every return after the environment is ready attempts fault restoration using
-// an independent bounded context; nothing is restored if readiness fails. Traffic is stopped and drained before restoration.
+// Run executes the optional environment reset, readiness, fault reset, traffic,
+// baseline, fault injection, trigger and backend waits, investigation, and
+// cleanup. Non-cancellation investigation errors belong to the result (a
+// diagnosis FAIL), not infrastructure errors. Every return after the environment
+// is ready attempts fault restoration using an independent bounded context;
+// nothing is restored if the reset or readiness fails, because no fault has been
+// injected. Traffic is stopped and drained before restoration.
 // Cleanup errors are returned even if the investigation produced a diagnosis;
 // errors.Join preserves an earlier lifecycle error as well.
 func (r *Runner) Run(ctx context.Context, sc scenarios.Scenario) (record RunRecord, err error) {
@@ -112,6 +124,9 @@ func (r *Runner) Run(ctx context.Context, sc scenarios.Scenario) (record RunReco
 		}
 	}()
 
+	if err := r.reset(ctx, &record); err != nil {
+		return record, err
+	}
 	if err := r.waitReady(ctx, &record); err != nil {
 		return record, err
 	}
@@ -154,6 +169,23 @@ func (r *Runner) Run(ctx context.Context, sc scenarios.Scenario) (record RunReco
 		return record, record.InvestigationError
 	}
 	return record, nil
+}
+
+func (r *Runner) reset(ctx context.Context, record *RunRecord) error {
+	if r.cfg.Reset == nil {
+		return nil
+	}
+	return timed(&record.Timings.Reset, func() error {
+		r.logger.Info("resetting environment")
+		start := time.Now()
+		resetCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		if err := r.cfg.Reset.Reset(resetCtx); err != nil {
+			return fmt.Errorf("reset environment: %w", err)
+		}
+		r.logger.Info("environment reset", "duration", time.Since(start).Round(100*time.Millisecond))
+		return nil
+	})
 }
 
 func (r *Runner) waitReady(ctx context.Context, record *RunRecord) error {

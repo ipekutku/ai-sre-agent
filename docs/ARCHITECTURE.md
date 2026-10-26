@@ -1,7 +1,8 @@
 # Architecture
 
 This document describes the system as implemented (Milestones 1 and 2, plus Milestone 3
-investigation recording, counters, and reusable scenario execution). For goals and long-term direction, see
+investigation recording, counters, reusable scenario execution, and per-run environment reset).
+For goals and long-term direction, see
 [PROJECT.md](PROJECT.md) and [ROADMAP.md](ROADMAP.md).
 
 ## Overview
@@ -47,13 +48,13 @@ investigation recording, counters, and reusable scenario execution). For goals a
 | Agent | `internal/agent` | investigation loop, budgets, `submit_diagnosis` validation, stats, in-memory tool-call record, investigation and LLM spans |
 | Diagnosis | `internal/diagnosis` | diagnosis schema and the closed root-cause code list |
 | Evaluation | `internal/evaluation` | loads ground truth; compares diagnosis; report |
-| Runner | `internal/runner` | reusable scenario lifecycle; records timings, traffic, agent result and errors; drains traffic and restores faults |
+| Runner | `internal/runner` | reusable scenario lifecycle; optional environment reset; records timings, traffic, agent result and errors; drains traffic and restores faults |
 | Runner CLI | `cmd/scenario-runner` | flags, dependency and tracer wiring, ground-truth loading, evaluation and report (`make eval`; `make eval-all` runs it for every scenario) |
 
 ## Scenario execution
 
-`Runner.Run(ctx, scenarios.Scenario)` executes readiness → clear leftover fault → traffic →
-baseline → fault injection → trigger wait → backend catch-up → investigation → cleanup. It
+`Runner.Run(ctx, scenarios.Scenario)` executes environment reset → readiness → clear leftover
+fault → traffic → baseline → fault injection → trigger wait → backend catch-up → investigation → cleanup. It
 returns a `RunRecord` containing scenario ID, incident, step durations (including failed steps),
 trigger value, traffic counts, the full `agent.Result`, and separate investigation and cleanup
 errors. `InvestigationStarted` distinguishes setup failures from investigation failures. The
@@ -61,13 +62,22 @@ record has no ground truth; `internal/runner` does not import the evaluator. Onl
 is passed to its `Investigator` interface. `scenarios.Environment` implements the environment
 interface with the existing uninstrumented HTTP operations.
 
-Readiness has a 2 min timeout; trace and log catch-up share a separate 2 min timeout. After
-readiness succeeds, every return attempts fault restoration, even if the initial clear or an
-injection failed. If readiness fails, nothing has been injected and restoration is skipped.
+The reset ([ADR 0007](adr/0007-environment-reset-by-recreating-containers.md)) is
+`Config.Reset`; nil skips it (`-reset=false`). `scenarios.ComposeReset` recreates inventory-api,
+checkout-api, Prometheus, Tempo and Loki with a fixed `docker compose up --detach --no-build
+--force-recreate --renew-anon-volumes` argument list, run without a shell. This discards
+earlier runs' metrics, traces, logs and fault state; Grafana keeps running. Compose output is
+kept only in errors, capped at 2 KiB.
+
+The reset and readiness each have a 2 min timeout; trace and log catch-up share a separate 2 min
+timeout. After readiness succeeds, every return attempts fault restoration, even if the initial
+clear or an injection failed. If the reset or readiness fails, nothing has been injected and
+restoration is skipped.
 Cleanup first cancels traffic and waits for all in-flight requests (each bounded by 5 s), then
 clears the fault with an independent 10 s context. It runs after caller cancellation as well.
-Cleanup failures are retained in the record and returned (not logged) as infrastructure errors, joined with any prior lifecycle error. An earlier investigation failure
-and partial agent result remain in their own fields. The record's `Error` is the final returned
+Cleanup failures are retained in the record and returned (not logged) as infrastructure
+errors, joined with any prior lifecycle error. An earlier investigation failure and partial
+agent result remain in their own fields. The record's `Error` is the final returned
 lifecycle error; non-cancellation investigation errors alone remain diagnosis failures.
 
 The CLI evaluates only after execution and cleanup, using the returned diagnosis. Exit codes
@@ -75,7 +85,7 @@ are 0 for PASS, 1 for FAIL, and 2 for infrastructure errors (including cleanup f
 cancellation, so the Makefile loops stop. If investigation started, its report is printed even
 when cleanup fails or the run is cancelled afterwards; a diagnosis PASS does not imply
 successful cleanup. Setup failures before investigation do not produce a diagnosis
-report. Environment reset and suite aggregation remain future Milestone 3 work.
+report. Suite aggregation remains future Milestone 3 work.
 
 ## Investigation flow
 
@@ -155,9 +165,9 @@ evaluation; it is not added to the conversation, printed, persisted, logged or e
 It contains observations only and has no access to ground truth.
 
 `make eval-all` runs every scenario in `scenarios/` through the same runner, one after another,
-and lists PASS or FAIL per scenario. It is a Makefile loop, not a separate framework. The
-scenarios share one environment: a cooldown separates their faults in time, but an
-investigation's range queries can still reach an earlier scenario's fault.
+and lists PASS or FAIL per scenario. It is a Makefile loop, not a separate framework. Each run
+resets the environment, so no run can see an earlier one's fault. With `-reset=false` the runs
+share one environment, and an optional `COOLDOWN` only separates their faults in time.
 
 ## Security boundaries
 
@@ -170,6 +180,8 @@ investigation's range queries can still reach an earlier scenario's fault.
   mechanism only.
 - Tempo's OTLP receiver is published on 127.0.0.1:4318 so the host-side runner can export spans;
   anything local can write spans to it.
+- The runner, not the agent, runs `docker compose` for the reset: fixed arguments, no shell, and
+  only the operator's `-compose-file` as input. It needs the same Docker access as `make up`.
 - Grafana allows anonymous access as a Viewer that may use Explore (`viewers_can_edit`,
   deprecated in Grafana but the narrowest setting that allows Explore), with the login form
   disabled and read-only provisioned datasources. It relies on binding to 127.0.0.1.
